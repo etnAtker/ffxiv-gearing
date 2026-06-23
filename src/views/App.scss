@@ -185,6 +185,7 @@ svg {
 @include meta.load-css("./FilterPanel");
 @include meta.load-css("./LevelSyncPanel");
 @include meta.load-css("./MateriaOverallPanel");
+@include meta.load-css("./GearOptimizerPanel");
 @include meta.load-css("./SharePanel");
 @include meta.load-css("./ImportPanel");
 @include meta.load-css("./SettingPanel");
