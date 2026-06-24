@@ -6,43 +6,29 @@ import { useStore } from './components/contexts';
 import type { DropdownPopperProps } from './components/Dropdown';
 import type { GearOptimizationConfig, GearOptimizationResult } from '../optimizer/GearOptimizerTypes';
 
-type GearOptimizationObjectiveType = 'damage' | 'mitigationEfficiency';
-
 interface GearOptimizerPanelState {
   minGcd?: string,
   maxGcd?: string,
   targetGcd?: string,
   pruneRatio: string,
   resultLimit: string,
-  objectiveType: GearOptimizationObjectiveType,
-  resultObjectiveType: GearOptimizationObjectiveType,
-  theoreticalMaxDamage?: string,
   minTenMitigation: string,
 }
 
 const gearOptimizerPanelState: GearOptimizerPanelState = {
-  pruneRatio: '99.5',
+  pruneRatio: '99',
   resultLimit: '5',
-  objectiveType: 'damage',
-  resultObjectiveType: 'damage',
   minTenMitigation: '',
 };
 
 export const GearOptimizerPanel = mobxReact.observer<DropdownPopperProps>(({ toggle }) => {
   const store = useStore();
   const defaultGcd = store.equippedEffects?.gcd.toFixed(2) ?? '';
-  const defaultDamage = store.equippedEffects?.damage.toFixed(5) ?? '';
   const [ minGcd, setMinGcdState ] = React.useState(gearOptimizerPanelState.minGcd ?? defaultGcd);
   const [ maxGcd, setMaxGcdState ] = React.useState(gearOptimizerPanelState.maxGcd ?? defaultGcd);
   const [ targetGcd, setTargetGcdState ] = React.useState(gearOptimizerPanelState.targetGcd ?? defaultGcd);
   const [ pruneRatio, setPruneRatioState ] = React.useState(gearOptimizerPanelState.pruneRatio);
   const [ resultLimit, setResultLimitState ] = React.useState(gearOptimizerPanelState.resultLimit);
-  const [ objectiveType, setObjectiveTypeState ] =
-    React.useState<GearOptimizationObjectiveType>(gearOptimizerPanelState.objectiveType);
-  const [ resultObjectiveType, setResultObjectiveTypeState ] =
-    React.useState<GearOptimizationObjectiveType>(gearOptimizerPanelState.resultObjectiveType);
-  const [ theoreticalMaxDamage, setTheoreticalMaxDamageState ] =
-    React.useState(gearOptimizerPanelState.theoreticalMaxDamage ?? defaultDamage);
   const [ minTenMitigation, setMinTenMitigationState ] = React.useState(gearOptimizerPanelState.minTenMitigation);
   const optimizationStatus = store.gearOptimizationStatus;
   const report = optimizationStatus.status === 'done' ? optimizationStatus.report : undefined;
@@ -69,45 +55,29 @@ export const GearOptimizerPanel = mobxReact.observer<DropdownPopperProps>(({ tog
     gearOptimizerPanelState.resultLimit = value;
     setResultLimitState(value);
   };
-  const setResultObjectiveType = (type: GearOptimizationObjectiveType) => {
-    gearOptimizerPanelState.resultObjectiveType = type;
-    setResultObjectiveTypeState(type);
-  };
-  const setTheoreticalMaxDamage = (value: string) => {
-    gearOptimizerPanelState.theoreticalMaxDamage = value;
-    setTheoreticalMaxDamageState(value);
-  };
   const setMinTenMitigation = (value: string) => {
     gearOptimizerPanelState.minTenMitigation = value;
     setMinTenMitigationState(value);
-  };
-  const setOptimizationObjectiveType = (type: GearOptimizationObjectiveType) => {
-    gearOptimizerPanelState.objectiveType = type;
-    setObjectiveTypeState(type);
-    if (type === 'mitigationEfficiency') {
-      setPruneRatio('30');
-    } else {
-      setPruneRatio('99.5');
+    if (value !== '' && pruneRatio === '99') {
+      setPruneRatio('95');
     }
   };
   const optimize = () => {
-    const selectedObjectiveType = supportsTenacity ? objectiveType : 'damage';
     const config: GearOptimizationConfig = {
       minGcd: parseOptionalNumber(minGcd),
       maxGcd: parseOptionalNumber(maxGcd),
       targetGcd: parseOptionalNumber(targetGcd),
       pruneRatio: parseOptionalNumber(pruneRatio),
+      minTenMitigation: supportsTenacity ? parseOptionalPercent(minTenMitigation) : undefined,
       resultLimit: parseInt(resultLimit, 10) || 5,
-      objective: buildObjectiveConfig(selectedObjectiveType, theoreticalMaxDamage, minTenMitigation),
     };
-    setResultObjectiveType(selectedObjectiveType);
     store.runGearOptimization(config);
   };
   return (
     <div className="gear-optimizer card">
       <div className="gear-optimizer_header">
         <div className="gear-optimizer_title">装备优化</div>
-        <div className="gear-optimizer_subtitle">{getObjectiveSubtitle(supportsTenacity ? objectiveType : 'damage')}</div>
+        <div className="gear-optimizer_subtitle">每威力伤害期望最大</div>
       </div>
       {unavailable ? (
         <div className="gear-optimizer_message">装备优化仅支持编辑中的战斗职业。</div>
@@ -171,49 +141,18 @@ export const GearOptimizerPanel = mobxReact.observer<DropdownPopperProps>(({ tog
               />
             </label>
             {supportsTenacity && (
-              <>
-                <label className="gear-optimizer_field -wide">
-                  <span>优化目标</span>
-                  <select
-                    className="gear-optimizer_select"
-                    disabled={running}
-                    value={objectiveType}
-                    onChange={(e: React.ChangeEvent<HTMLSelectElement>) => {
-                      setOptimizationObjectiveType(e.target.value as GearOptimizationObjectiveType);
-                    }}
-                  >
-                    <option value="damage">最高伤害期望</option>
-                    <option value="mitigationEfficiency">目标减伤率</option>
-                  </select>
-                </label>
-                {objectiveType === 'mitigationEfficiency' && (
-                  <label className="gear-optimizer_field -wide">
-                    <span>参考期望</span>
-                    <TextField
-                      className="gear-optimizer_input mdc-text-field--compact"
-                      disabled={running}
-                      type="number"
-                      step="0.00001"
-                      value={theoreticalMaxDamage}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTheoreticalMaxDamage(e.target.value)}
-                    />
-                  </label>
-                )}
-                {objectiveType === 'mitigationEfficiency' && (
-                  <label className="gear-optimizer_field -wide">
-                    <span>目标减伤率</span>
-                    <TextField
-                      className="gear-optimizer_input mdc-text-field--compact"
-                      disabled={running}
-                      type="number"
-                      step="0.01"
-                      suffix="%"
-                      value={minTenMitigation}
-                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMinTenMitigation(e.target.value)}
-                    />
-                  </label>
-                )}
-              </>
+              <label className="gear-optimizer_field -wide">
+                <span>最低减伤率</span>
+                <TextField
+                  className="gear-optimizer_input mdc-text-field--compact"
+                  disabled={running}
+                  type="number"
+                  step="0.01"
+                  suffix="%"
+                  value={minTenMitigation}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setMinTenMitigation(e.target.value)}
+                />
+              </label>
             )}
           </div>
           <div className="gear-optimizer_actions">
@@ -237,7 +176,7 @@ export const GearOptimizerPanel = mobxReact.observer<DropdownPopperProps>(({ tog
             <div className="gear-optimizer_message">{report.error}</div>
           )}
           {report !== undefined && report.results.length > 0 && (
-            <OptimizationResults results={report.results} objectiveType={resultObjectiveType} onApply={result => {
+            <OptimizationResults results={report.results} onApply={result => {
               store.applyGearOptimization(result);
               toggle();
             }} />
@@ -268,18 +207,15 @@ const Progress = mobxReact.observer<{
 
 const OptimizationResults = mobxReact.observer<{
   results: GearOptimizationResult[],
-  objectiveType: GearOptimizationObjectiveType,
   onApply: (result: GearOptimizationResult) => void,
-}>(({ results, objectiveType, onApply }) => {
+}>(({ results, onApply }) => {
   const showTenacity = results.some(result => result.tenMitigation > 0);
-  const showObjectiveScore = objectiveType === 'mitigationEfficiency';
   return (
   <table className="gear-optimizer_results table">
     <thead>
     <tr>
       <th>伤害期望</th>
       {showTenacity && <th>减伤率</th>}
-      {showObjectiveScore && <th>伤害转换率</th>}
       <th>GCD</th>
       <th>品级</th>
       <th />
@@ -290,7 +226,6 @@ const OptimizationResults = mobxReact.observer<{
       <tr key={i}>
         <td>{result.damage.toFixed(5)}</td>
         {showTenacity && <td>{formatPercent(result.tenMitigation)}</td>}
-        {showObjectiveScore && <td>{formatObjectiveScore(result)}</td>}
         <td>{result.gcd.toFixed(2)}s</td>
         <td>il{result.equippedLevel}</td>
         <td>
@@ -303,45 +238,13 @@ const OptimizationResults = mobxReact.observer<{
   );
 });
 
-function buildObjectiveConfig(
-  type: GearOptimizationObjectiveType,
-  theoreticalMaxDamage: string,
-  minTenMitigation: string,
-): GearOptimizationConfig['objective'] {
-  switch (type) {
-    case 'mitigationEfficiency':
-      return {
-        type: 'mitigationEfficiency',
-        theoreticalMaxDamage: parseOptionalNumber(theoreticalMaxDamage) ?? 0,
-        minTenMitigation: parseOptionalPercent(minTenMitigation),
-      };
-    case 'damage':
-    default:
-      return { type: 'damage' };
-  }
-}
-
 function parseOptionalPercent(value: string): number | undefined {
   const parsed = parseOptionalNumber(value);
   return parsed === undefined ? undefined : parsed / 100;
 }
 
-function getObjectiveSubtitle(type: GearOptimizationObjectiveType): string {
-  switch (type) {
-    case 'mitigationEfficiency':
-      return '减伤率不低于目标且伤害转换率最高';
-    case 'damage':
-    default:
-      return '每威力伤害期望最大';
-  }
-}
-
 function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
-}
-
-function formatObjectiveScore(result: GearOptimizationResult): string {
-  return result.objectiveScore.toFixed(6);
 }
 
 function parseOptionalNumber(value: string): number | undefined {

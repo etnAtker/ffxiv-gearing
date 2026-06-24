@@ -6,13 +6,9 @@ export interface GearOptimizationConfig {
   maxGcd?: number,
   targetGcd?: number,
   pruneRatio?: number,
+  minTenMitigation?: number,
   resultLimit: number,
-  objective?: GearOptimizationObjective,
 }
-
-export type GearOptimizationObjective =
-  | { type: 'damage' }
-  | { type: 'mitigationEfficiency', theoreticalMaxDamage: number, minTenMitigation?: number };
 
 export interface MateriaAssignment {
   index: number,
