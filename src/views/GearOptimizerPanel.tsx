@@ -290,7 +290,7 @@ const OptimizationResults = mobxReact.observer<{
       <tr key={i}>
         <td>{result.damage.toFixed(5)}</td>
         {showTenacity && <td>{formatPercent(result.tenMitigation)}</td>}
-        {showObjectiveScore && <td>{formatObjectiveScore(result, objectiveType)}</td>}
+        {showObjectiveScore && <td>{formatObjectiveScore(result)}</td>}
         <td>{result.gcd.toFixed(2)}s</td>
         <td>il{result.equippedLevel}</td>
         <td>
@@ -340,7 +340,7 @@ function formatPercent(value: number): string {
   return `${(value * 100).toFixed(2)}%`;
 }
 
-function formatObjectiveScore(result: GearOptimizationResult, type: GearOptimizationObjectiveType): string {
+function formatObjectiveScore(result: GearOptimizationResult): string {
   return result.objectiveScore.toFixed(6);
 }
 
