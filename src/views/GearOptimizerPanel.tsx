@@ -8,10 +8,11 @@ import type { GearOptimizationConfig, GearOptimizationResult } from '../optimize
 
 export const GearOptimizerPanel = mobxReact.observer<DropdownPopperProps>(({ toggle }) => {
   const store = useStore();
-  const [ minGcd, setMinGcd ] = React.useState('');
-  const [ maxGcd, setMaxGcd ] = React.useState(store.equippedEffects?.gcd.toFixed(2) ?? '');
-  const [ targetGcd, setTargetGcd ] = React.useState('');
-  const [ pruneRatio, setPruneRatio ] = React.useState('99');
+  const defaultGcd = store.equippedEffects?.gcd.toFixed(2) ?? '';
+  const [ minGcd, setMinGcd ] = React.useState(defaultGcd);
+  const [ maxGcd, setMaxGcd ] = React.useState(defaultGcd);
+  const [ targetGcd, setTargetGcd ] = React.useState(defaultGcd);
+  const [ pruneRatio, setPruneRatio ] = React.useState('99.5');
   const [ resultLimit, setResultLimit ] = React.useState('5');
   const optimizationStatus = store.gearOptimizationStatus;
   const report = optimizationStatus.status === 'done' ? optimizationStatus.report : undefined;

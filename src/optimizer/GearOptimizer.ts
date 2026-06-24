@@ -13,12 +13,15 @@ interface LocalPlan {
   slot: number,
   gearId: G.GearId,
   itemId: number,
+  itemIds: number[],
+  selectedGears: [number, G.GearId][],
   stats: G.Stats,
   statEntries: [number, number][],
   speed: number,
   equippedLevelContribution: number,
   equippedLevelWeight: number,
   materiaAssignments: MateriaAssignment[],
+  materiaAssignmentsByGear: [G.GearId, MateriaAssignment[]][],
   changeCount: number,
   materiaCount: number,
 }
@@ -51,6 +54,20 @@ interface ScoredState {
   score: number,
 }
 
+interface SkylinePoint {
+  stateIndex: number,
+  values: number[],
+}
+
+interface LocalMateriaState {
+  stats: G.Stats,
+  assignments: MateriaAssignment[],
+}
+
+type SparseFenwickNode = Map<number, number | SparseFenwickNode>;
+
+const smallBucketSkylineThreshold = 64;
+
 const optimizerStats = (Object.keys(G.statNames) as G.Stat[])
   .filter(stat => stat !== 'main' && stat !== 'secondary');
 const optimizerStatIndex = new Map<G.Stat, number>(optimizerStats.map((stat, i) => [stat, i]));
@@ -76,18 +93,7 @@ export function optimizeGearset(
 
   onProgress({ phase: '生成局部方案', current: 0, total: input.candidateSlots.length });
   const localPlans: LocalPlan[] = [];
-  const candidateSlots: CandidateSlotPlans[] = input.candidateSlots.map((slot, i) => {
-    const plans = slot.plans
-      .flatMap(gear => buildLocalPlans(input, gear, speedStat))
-      .filter(plan => plan.speed <= speedRange.max);
-    const planIndexes = plans.map(plan => {
-      const index = localPlans.length;
-      localPlans.push(plan);
-      return index;
-    });
-    onProgress({ phase: '生成局部方案', current: i + 1, total: input.candidateSlots.length });
-    return { slot: slot.slot, name: slot.name, planIndexes };
-  });
+  const candidateSlots = buildCandidateSlotPlans(input, speedStat, speedRange, localPlans, onProgress);
 
   if (input.foodCandidates.length === 0) {
     return { results: [], error: '没有可用食品候选。', candidateCount: 0, stateCount: 0 };
@@ -108,7 +114,7 @@ export function optimizeGearset(
     for (const stateIndex of states) {
       for (const planIndex of candidateSlots[i].planIndexes) {
         const plan = localPlans[planIndex];
-        if (hasUsedItemId(pool, localPlans, stateIndex, plan.itemId)) continue;
+        if (hasUsedAnyItemId(pool, localPlans, stateIndex, plan.itemIds)) continue;
         const nextSpeed = pool.speed[stateIndex] + plan.speed;
         if (nextSpeed > speedRange.max) continue;
         if (nextSpeed + remainingMaxSpeeds[i + 1] < speedRange.min) continue;
@@ -191,6 +197,92 @@ function findFixedDuplicate(input: GearOptimizationInput): OptimizerGearInput | 
   }
 }
 
+function buildCandidateSlotPlans(
+  input: GearOptimizationInput,
+  speedStat: G.Stat,
+  speedRange: SpeedRange,
+  localPlans: LocalPlan[],
+  onProgress: (progress: GearOptimizationProgress) => void,
+): CandidateSlotPlans[] {
+  const ret: CandidateSlotPlans[] = [];
+  const ringSlots = input.candidateSlots.filter(slot => Math.abs(slot.slot) === 12);
+  for (let i = 0; i < input.candidateSlots.length; i++) {
+    const slot = input.candidateSlots[i];
+    if (slot.slot === -12) {
+      onProgress({ phase: '生成局部方案', current: i + 1, total: input.candidateSlots.length });
+      continue;
+    }
+    if (slot.slot === 12 && ringSlots.length === 2) {
+      const plans = buildRingPairPlans(input, ringSlots[0], ringSlots[1], speedStat)
+        .filter(plan => plan.speed <= speedRange.max);
+      ret.push(addCandidateSlotPlans(slot.slot, slot.name, plans, localPlans));
+    } else {
+      const plans = slot.plans
+        .flatMap(gear => buildLocalPlans(input, gear, speedStat))
+        .filter(plan => plan.speed <= speedRange.max);
+      ret.push(addCandidateSlotPlans(slot.slot, slot.name, plans, localPlans));
+    }
+    onProgress({ phase: '生成局部方案', current: i + 1, total: input.candidateSlots.length });
+  }
+  return ret;
+}
+
+function addCandidateSlotPlans(
+  slot: number,
+  name: string,
+  plans: LocalPlan[],
+  localPlans: LocalPlan[],
+): CandidateSlotPlans {
+  const planIndexes = plans.map(plan => {
+    const index = localPlans.length;
+    localPlans.push(plan);
+    return index;
+  });
+  return { slot, name, planIndexes };
+}
+
+function buildRingPairPlans(
+  input: GearOptimizationInput,
+  leftSlot: GearOptimizationInput['candidateSlots'][number],
+  rightSlot: GearOptimizationInput['candidateSlots'][number],
+  speedStat: G.Stat,
+): LocalPlan[] {
+  const leftPlans = leftSlot.plans.flatMap(gear => buildLocalPlans(input, gear, speedStat));
+  const rightPlans = rightSlot.plans.flatMap(gear => buildLocalPlans(input, gear, speedStat));
+  const ret: LocalPlan[] = [];
+  for (const left of leftPlans) {
+    for (const right of rightPlans) {
+      if (left.itemId === right.itemId) continue;
+      ret.push(combineLocalPlans(left, right, speedStat));
+    }
+  }
+  return pruneLocalPlans(ret, getBenefitStats(G.jobSchemas[input.job], speedStat));
+}
+
+function combineLocalPlans(left: LocalPlan, right: LocalPlan, speedStat: G.Stat): LocalPlan {
+  const stats = addStats(left.stats, right.stats);
+  const statValues = statsToArray(stats);
+  return {
+    slot: left.slot,
+    gearId: left.gearId,
+    itemId: left.itemId,
+    itemIds: [...left.itemIds, ...right.itemIds],
+    selectedGears: [...left.selectedGears, ...right.selectedGears],
+    stats,
+    statEntries: statValuesToEntries(statValues),
+    speed: stats[speedStat] ?? 0,
+    equippedLevelContribution: left.equippedLevelContribution + right.equippedLevelContribution,
+    equippedLevelWeight: left.equippedLevelWeight + right.equippedLevelWeight,
+    materiaAssignments: [...left.materiaAssignments, ...right.materiaAssignments],
+    materiaAssignmentsByGear: [
+      ...left.materiaAssignmentsByGear,
+      ...right.materiaAssignmentsByGear,
+    ],
+    changeCount: left.changeCount + right.changeCount,
+    materiaCount: left.materiaCount + right.materiaCount,
+  };
+}
+
 function buildLocalPlans(input: GearOptimizationInput, gear: OptimizerGearInput, speedStat: G.Stat): LocalPlan[] {
   const emptyMaterias = gear.syncedLevel === undefined
     ? gear.materias.filter(materia => materia.fixedStat === undefined)
@@ -202,48 +294,51 @@ function buildLocalPlans(input: GearOptimizationInput, gear: OptimizerGearInput,
   if (materiaOptions.length === 0) {
     return [buildLocalPlan(gear, speedStat, [])];
   }
-  const assignments: MateriaAssignment[][] = [];
-  enumerateMateriaAssignments(materiaOptions, 0, [], assignments);
-  const plans = assignments.map(assignment => buildLocalPlan(gear, speedStat, assignment));
+  let states = new Map<string, LocalMateriaState>();
+  const initialStats = calculateGearStats(gear, []);
+  states.set(statsKey(initialStats), { stats: initialStats, assignments: [] });
+  for (const options of materiaOptions) {
+    const nextStates = new Map<string, LocalMateriaState>();
+    for (const state of states.values()) {
+      for (const option of options) {
+        const stats = applyMateriaToGearStats(gear, state.stats, option);
+        const assignments = [...state.assignments, option];
+        const key = statsKey(stats);
+        const existing = nextStates.get(key);
+        if (existing === undefined || compareMateriaAssignments(assignments, existing.assignments) < 0) {
+          nextStates.set(key, { stats, assignments });
+        }
+      }
+    }
+    states = nextStates;
+  }
+  const plans = Array.from(states.values(), state => buildLocalPlan(gear, speedStat, state.assignments, state.stats));
   return pruneLocalPlans(plans, getBenefitStats(G.jobSchemas[input.job], speedStat));
-}
-
-function enumerateMateriaAssignments(
-  options: (MateriaAssignment | undefined)[][],
-  index: number,
-  current: MateriaAssignment[],
-  ret: MateriaAssignment[][],
-) {
-  if (index === options.length) {
-    ret.push(current.slice());
-    return;
-  }
-  for (const option of options[index]) {
-    if (option !== undefined) current.push(option);
-    enumerateMateriaAssignments(options, index + 1, current, ret);
-    if (option !== undefined) current.pop();
-  }
 }
 
 function buildLocalPlan(
   gear: OptimizerGearInput,
   speedStat: G.Stat,
   assignments: MateriaAssignment[],
+  stats = calculateGearStats(gear, assignments),
 ): LocalPlan {
-  const stats = calculateGearStats(gear, assignments);
   const statValues = statsToArray(stats);
+  const materiaAssignments = assignments.slice();
   return {
     slot: gear.slot,
     gearId: gear.id,
     itemId: Math.abs(gear.id),
+    itemIds: [Math.abs(gear.id)],
+    selectedGears: [[gear.slot, gear.id]],
     stats,
     statEntries: statValuesToEntries(statValues),
     speed: stats[speedStat] ?? 0,
     equippedLevelContribution: gear.level * gear.slotWeight,
     equippedLevelWeight: gear.slotWeight,
-    materiaAssignments: assignments,
+    materiaAssignments,
+    materiaAssignmentsByGear: materiaAssignments.length > 0 ? [[gear.id, materiaAssignments]] : [],
     changeCount: gear.fixed ? 0 : 1,
-    materiaCount: assignments.length,
+    materiaCount: materiaAssignments.length,
   };
 }
 
@@ -280,6 +375,22 @@ function calculateGearStats(gear: OptimizerGearInput, assignments: MateriaAssign
   return stats;
 }
 
+function applyMateriaToGearStats(
+  gear: OptimizerGearInput,
+  currentStats: G.Stats,
+  assignment: MateriaAssignment,
+): G.Stats {
+  const stats = { ...currentStats };
+  if (gear.materiaSlot <= 0) return stats;
+  const materiaValue = G.materias[assignment.stat]![assignment.grade - 1];
+  const base = gear.bareStats[assignment.stat] ?? 0;
+  stats[assignment.stat] = Math.min(
+    (stats[assignment.stat] ?? 0) + materiaValue,
+    Math.max(base, gear.caps[assignment.stat]!),
+  );
+  return stats;
+}
+
 function pruneLocalPlans(plans: LocalPlan[], benefitStats: G.Stat[]): LocalPlan[] {
   const uniquePlans = uniqueLocalPlans(plans);
   return uniquePlans.filter((plan, i) => !uniquePlans.some((other, j) => i !== j &&
@@ -301,6 +412,29 @@ function uniqueLocalPlans(plans: LocalPlan[]): LocalPlan[] {
     if (seen.has(key)) continue;
     seen.add(key);
     ret.push(plan);
+  }
+  return ret;
+}
+
+function statsKey(stats: G.Stats): string {
+  return Object.entries(stats).sort(([a], [b]) => a.localeCompare(b))
+    .map(([stat, value]) => `${stat}:${value}`)
+    .join(',');
+}
+
+function compareMateriaAssignments(a: MateriaAssignment[], b: MateriaAssignment[]): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i].index !== b[i].index) return a[i].index - b[i].index;
+    if (a[i].stat !== b[i].stat) return a[i].stat.localeCompare(b[i].stat);
+    if (a[i].grade !== b[i].grade) return a[i].grade - b[i].grade;
+  }
+  return a.length - b.length;
+}
+
+function addStats(a: G.Stats, b: G.Stats): G.Stats {
+  const ret: G.Stats = { ...a };
+  for (const [ stat, value ] of Object.entries(b) as G.StatPairs) {
+    ret[stat] = (ret[stat] ?? 0) + value;
   }
   return ret;
 }
@@ -373,10 +507,12 @@ function addState(pool: StatePool, state: {
   return index;
 }
 
-function hasUsedItemId(pool: StatePool, localPlans: LocalPlan[], stateIndex: number, itemId: number): boolean {
+function hasUsedAnyItemId(pool: StatePool, localPlans: LocalPlan[], stateIndex: number, itemIds: number[]): boolean {
   for (let index = stateIndex; index >= 0; index = pool.prevStateIndex[index]) {
     const planIndex = pool.planIndex[index];
-    if (planIndex >= 0 && localPlans[planIndex].itemId === itemId) return true;
+    if (planIndex < 0) continue;
+    const usedItemIds = localPlans[planIndex].itemIds;
+    if (itemIds.some(itemId => usedItemIds.includes(itemId))) return true;
   }
   return false;
 }
@@ -432,6 +568,24 @@ function pruneByObjectiveRatio(
 }
 
 function buildParetoFrontier(pool: StatePool, scoredStates: ScoredState[], benefitStats: number[]): number[] {
+  if (scoredStates.length < smallBucketSkylineThreshold) {
+    return buildParetoFrontierNaive(pool, scoredStates, benefitStats);
+  }
+  const stateIndexes = canonicalizeStateVectors(pool, scoredStates.map(item => item.stateIndex), benefitStats);
+  if (stateIndexes.length < smallBucketSkylineThreshold) {
+    return buildParetoFrontierNaive(pool, stateIndexes.map(stateIndex => ({ stateIndex, score: 0 })), benefitStats);
+  }
+  const effectiveStats = getEffectiveBenefitStats(pool, stateIndexes, benefitStats);
+  if (effectiveStats.length === 0) return stateIndexes;
+  const points = stateIndexes.map(stateIndex => ({
+    stateIndex,
+    values: effectiveStats.map(stat => pool.statsWithoutFood[stateIndex][stat]),
+  }));
+  if (effectiveStats.length === 1) return buildOneDimensionalSkyline(points);
+  return buildIndexedSkyline(points);
+}
+
+function buildParetoFrontierNaive(pool: StatePool, scoredStates: ScoredState[], benefitStats: number[]): number[] {
   const frontier: number[] = [];
   for (const { stateIndex } of scoredStates) {
     if (frontier.some(otherIndex => dominatesState(pool, otherIndex, stateIndex, benefitStats))) continue;
@@ -443,6 +597,141 @@ function buildParetoFrontier(pool: StatePool, scoredStates: ScoredState[], benef
     frontier.push(stateIndex);
   }
   return frontier;
+}
+
+function canonicalizeStateVectors(pool: StatePool, states: number[], benefitStats: number[]): number[] {
+  const bestByVector = new Map<string, number>();
+  for (const stateIndex of states) {
+    const key = benefitStats.map(stat => pool.statsWithoutFood[stateIndex][stat]).join('|');
+    const existing = bestByVector.get(key);
+    if (existing === undefined || compareEquivalentStates(pool, stateIndex, existing) < 0) {
+      bestByVector.set(key, stateIndex);
+    }
+  }
+  return Array.from(bestByVector.values());
+}
+
+function compareEquivalentStates(pool: StatePool, a: number, b: number): number {
+  if (pool.changeCount[a] !== pool.changeCount[b]) return pool.changeCount[a] - pool.changeCount[b];
+  if (pool.materiaCount[a] !== pool.materiaCount[b]) return pool.materiaCount[a] - pool.materiaCount[b];
+  const aLevel = pool.equippedLevelWeight[a] === 0 ? 0 : pool.equippedLevelTotal[a] / pool.equippedLevelWeight[a];
+  const bLevel = pool.equippedLevelWeight[b] === 0 ? 0 : pool.equippedLevelTotal[b] / pool.equippedLevelWeight[b];
+  return bLevel - aLevel;
+}
+
+function getEffectiveBenefitStats(pool: StatePool, states: number[], benefitStats: number[]): number[] {
+  return benefitStats.filter(stat => {
+    const first = pool.statsWithoutFood[states[0]][stat];
+    return states.some(stateIndex => pool.statsWithoutFood[stateIndex][stat] !== first);
+  });
+}
+
+function buildOneDimensionalSkyline(points: SkylinePoint[]): number[] {
+  const best = Math.max(...points.map(point => point.values[0]));
+  return points
+    .filter(point => point.values[0] === best)
+    .map(point => point.stateIndex);
+}
+
+function buildIndexedSkyline(points: SkylinePoint[]): number[] {
+  const sorted = points.slice().sort(compareSkylinePoints);
+  if (sorted[0].values.length === 2) return buildTwoDimensionalSkyline(sorted);
+  const rankMaps = buildRankMaps(sorted);
+  const tree = createSparseFenwick(rankMaps.map(rankMap => rankMap.size));
+  const ret: number[] = [];
+  for (const point of sorted) {
+    const rankIndexes = point.values.slice(1, -1)
+      .map((value, i) => rankMaps[i].get(value)!);
+    const lastValue = point.values[point.values.length - 1];
+    if (sparseFenwickQuery(tree, rankIndexes) >= lastValue) continue;
+    ret.push(point.stateIndex);
+    sparseFenwickUpdate(tree, rankIndexes, lastValue);
+  }
+  return ret;
+}
+
+function compareSkylinePoints(a: SkylinePoint, b: SkylinePoint): number {
+  for (let i = 0; i < a.values.length; i++) {
+    const diff = b.values[i] - a.values[i];
+    if (diff !== 0) return diff;
+  }
+  return a.stateIndex - b.stateIndex;
+}
+
+function buildTwoDimensionalSkyline(points: SkylinePoint[]): number[] {
+  const ret: number[] = [];
+  let bestSecond = -Infinity;
+  for (const point of points) {
+    const second = point.values[1];
+    if (bestSecond >= second) continue;
+    ret.push(point.stateIndex);
+    bestSecond = second;
+  }
+  return ret;
+}
+
+function buildRankMaps(points: SkylinePoint[]): Map<number, number>[] {
+  const dimensionCount = points[0].values.length;
+  const ret: Map<number, number>[] = [];
+  for (let dim = 1; dim < dimensionCount - 1; dim++) {
+    const values = Array.from(new Set(points.map(point => point.values[dim]))).sort((a, b) => b - a);
+    ret.push(new Map(values.map((value, i) => [value, i + 1])));
+  }
+  return ret;
+}
+
+function createSparseFenwick(sizes: number[]) {
+  return {
+    sizes,
+    root: new Map<number, number | SparseFenwickNode>(),
+  };
+}
+
+function sparseFenwickUpdate(
+  tree: { sizes: number[], root: SparseFenwickNode },
+  indexes: number[],
+  value: number,
+): void {
+  updateSparseFenwickNode(tree.root, tree.sizes, indexes, 0, value);
+}
+
+function updateSparseFenwickNode(
+  node: SparseFenwickNode,
+  sizes: number[],
+  indexes: number[],
+  dim: number,
+  value: number,
+): void {
+  for (let i = indexes[dim]; i <= sizes[dim]; i += i & -i) {
+    if (dim === indexes.length - 1) {
+      node.set(i, Math.max((node.get(i) as number | undefined) ?? -Infinity, value));
+    } else {
+      let child = node.get(i) as SparseFenwickNode | undefined;
+      if (child === undefined) {
+        child = new Map<number, number | SparseFenwickNode>();
+        node.set(i, child);
+      }
+      updateSparseFenwickNode(child, sizes, indexes, dim + 1, value);
+    }
+  }
+}
+
+function sparseFenwickQuery(tree: { sizes: number[], root: SparseFenwickNode }, indexes: number[]): number {
+  return querySparseFenwickNode(tree.root, indexes, 0);
+}
+
+function querySparseFenwickNode(node: SparseFenwickNode, indexes: number[], dim: number): number {
+  let ret = -Infinity;
+  for (let i = indexes[dim]; i > 0; i -= i & -i) {
+    const value = node.get(i);
+    if (value === undefined) continue;
+    if (dim === indexes.length - 1) {
+      ret = Math.max(ret, value as number);
+    } else {
+      ret = Math.max(ret, querySparseFenwickNode(value as SparseFenwickNode, indexes, dim + 1));
+    }
+  }
+  return ret;
 }
 
 function scoreState(pool: StatePool, stateIndex: number, input: GearOptimizationInput, schema: G.JobSchema): number {
@@ -543,10 +832,8 @@ function buildResultPath(pool: StatePool, localPlans: LocalPlan[], stateIndex: n
   }
   for (let i = planIndexes.length - 1; i >= 0; i--) {
     const plan = localPlans[planIndexes[i]];
-    selectedGears.push([plan.slot, plan.gearId]);
-    if (plan.materiaAssignments.length > 0) {
-      materiaAssignments.push([plan.gearId, plan.materiaAssignments]);
-    }
+    selectedGears.push(...plan.selectedGears);
+    materiaAssignments.push(...plan.materiaAssignmentsByGear);
   }
   return { selectedGears, materiaAssignments };
 }
