@@ -14,6 +14,7 @@ import { JobSelector } from './JobSelector';
 import { FilterPanel } from './FilterPanel';
 import { LevelSyncPanel } from './LevelSyncPanel';
 import { MateriaOverallPanel } from './MateriaOverallPanel';
+import { GearOptimizerPanel } from './GearOptimizerPanel';
 import { SharePanel } from './SharePanel';
 import { ImportPanel } from './ImportPanel';
 import { SettingPanel } from './SettingPanel';
@@ -133,6 +134,15 @@ export const Condition = mobxReact.observer(() => {
             </Button>
           )}
           popper={MateriaOverallPanel}
+          placement="bottom-start"
+        />
+      )}
+      {editing && store.schema.mainStat !== undefined && (
+        <Dropdown
+          label={({ ref, toggle }) => (
+            <Button ref={ref} className="condition_button" onClick={toggle}>装备优化</Button>
+          )}
+          popper={GearOptimizerPanel}
           placement="bottom-start"
         />
       )}

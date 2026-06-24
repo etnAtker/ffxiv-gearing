@@ -7,6 +7,7 @@ test('visual regression', async ({ page }) => {
     await page.mouse.down();
     await expect.soft(page).toHaveScreenshot();
     await page.mouse.up();
+    await page.waitForTimeout(150);
     await expect.soft(page).toHaveScreenshot();
   };
 
@@ -41,6 +42,7 @@ test('visual regression', async ({ page }) => {
   await monitoredClick(page.getByText('90级'));
   await monitoredClick(page.getByRole('button', { name: '魔晶石' }));
   await monitoredClick(page.getByText('信念/直击分配优化'));
+  await monitoredClick(page.getByRole('button', { name: '装备优化' }));
   await monitoredClick(page.getByRole('button', { name: '分享' }));
   await page.locator('css=.share_url').hover();
   await expect.soft(page).toHaveScreenshot();

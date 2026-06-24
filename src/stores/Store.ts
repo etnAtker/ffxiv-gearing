@@ -2,6 +2,11 @@ import * as mobx from 'mobx';
 import * as mst from 'mobx-state-tree';
 import * as G from '../game';
 import * as share from '../share';
+import { runGearOptimizationInWorker, type GearOptimizationRunner } from '../optimizer/GearOptimizerRunner';
+import type { GearOptimizationConfig, GearOptimizationInput, GearOptimizationProgress,
+  GearOptimizationReport, GearOptimizationResult, GearOptimizationStatus, OptimizerFoodInput,
+  OptimizerGearInput } from '../optimizer/GearOptimizerTypes';
+import { calculateCombatEffects } from './effects';
 import { floor, ceil, Setting, Promotion, GearUnion, GearUnionReference,
   gearDataOrdered, gearDataLoading, loadGearDataOfGearId, loadGearDataOfLevelRange } from '.';
 import type { IGear, IFood, IGearUnion, IMateria } from '.';
@@ -38,6 +43,8 @@ export const Store = mst.types
     tiersShown: localStorage.getItem(tiersShownStorageKey) === 'true',
     materiaOverallActiveTab: 0,
     autoSelectScheduled: false,
+    gearOptimizationStatus: { status: 'idle' } as GearOptimizationStatus,
+    gearOptimizationRunner: undefined as GearOptimizationRunner | undefined,
   }))
   .views(self => ({
     get filteredIds(): G.GearId[] {
@@ -286,33 +293,13 @@ export const Store = mst.types
     get equippedEffects() {
       console.debug('equippedEffects');
       if (self.job === undefined) return;
-      const { statModifiers, mainStat, traitDamageMultiplier, partyBonus } = self.schema;
-      if (statModifiers === undefined || mainStat === undefined || traitDamageMultiplier === undefined) return;
-      const levelMod = G.jobLevelModifiers[self.jobLevel];
-      const { main, sub, div, det, detTrunc } = levelMod;
-      const { CRT, DET, DHT, TEN, SKS, SPS, VIT, PIE, PDMG, MDMG } = self.equippedStats;
-      const attackMainStat = mainStat === 'VIT' ? 'STR' : mainStat;
-      const bluAetherialMimicry = self.job === 'BLU' ? 200 : 0;
-      const crtChance = floor(200 * (CRT! - sub) / div + 50 + bluAetherialMimicry) / 1000;
-      const crtDamage = floor(200 * (CRT! - sub) / div + 1400) / 1000;
-      const detDamage = floor((140 * (DET! - main) / det + 1000) / detTrunc) * detTrunc / 1000;
-      const dhtChance = floor(550 * (DHT! - sub) / div + bluAetherialMimicry) / 1000;
-      const tenDamage = floor(112 * ((TEN ?? sub) - sub) / div + 1000) / 1000;
-      const tenMitigation = floor(200 * ((TEN ?? sub) - sub) / div) / 1000;
-      const weaponDamage = floor(main * statModifiers[attackMainStat]! / 1000) +
-        ((mainStat === 'MND' || mainStat === 'INT' ? MDMG : PDMG) ?? 0) +
-        (self.job === 'BLU' ? G.bluMdmgAdditions[self.equippedStats['INT']! - self.baseStats['INT']!] ?? 0 : 0);
-      const mainDamage = floor((mainStat === 'VIT' ? levelMod.apTank : levelMod.ap) *
-        (floor((self.equippedStats[attackMainStat] ?? 0) * (partyBonus ?? 1.05)) - main) / main + 100) / 100;
-      const damage = 0.01 * weaponDamage * mainDamage * detDamage * tenDamage * traitDamageMultiplier *
-        ((crtDamage - 1) * crtChance + 1) * (0.25 * dhtChance + 1);
-      const gcd = floor(floor((1000 - floor(130 * ((SKS ?? SPS)! - sub) / div)) * 2500 / 1000) *
-        (self.jobLevel >= 80 && statModifiers.gcd || 100) / 1000) / 100;
-      const ssDamage = floor(130 * ((SKS ?? SPS)! - sub) / div + 1000) / 1000;
-      const hp = levelMod.hp * statModifiers.hp +
-        floor((mainStat === 'VIT' ? levelMod.vitTank : levelMod.vit) * (VIT! - main));
-      const mp = floor(150 * ((PIE ?? main) - main) / div + 200);
-      return { crtChance, crtDamage, detDamage, dhtChance, tenDamage, tenMitigation, damage, gcd, ssDamage, hp, mp };
+      return calculateCombatEffects({
+        job: self.job,
+        jobLevel: self.jobLevel,
+        schema: self.schema,
+        stats: self.equippedStats,
+        baseStats: self.baseStats,
+      });
     },
     get equippedTiers(): { [index in G.Stat]?: { prev: number, next: number } } | undefined {
       const { statModifiers } = self.schema;
@@ -736,6 +723,63 @@ export const Store = mst.types
     toggleDuplicateToolMateria(): void {
       self.duplicateToolMateria = !self.duplicateToolMateria;
     },
+    runGearOptimization(config: GearOptimizationConfig): void {
+      self.gearOptimizationRunner?.cancel();
+      self.gearOptimizationStatus = {
+        status: 'running',
+        progress: { phase: '准备候选', current: 0, total: 1 },
+      };
+      const input = buildGearOptimizationInput(self as IStore);
+      self.gearOptimizationRunner = runGearOptimizationInWorker({
+        input,
+        config,
+        onProgress: progress => this.setGearOptimizationProgress(progress),
+        onResult: report => this.setGearOptimizationResult(report),
+        onError: error => this.setGearOptimizationError(error),
+      });
+    },
+    cancelGearOptimization(): void {
+      self.gearOptimizationRunner?.cancel();
+      self.gearOptimizationRunner = undefined;
+      self.gearOptimizationStatus = { status: 'cancelled' };
+    },
+    setGearOptimizationProgress(progress: GearOptimizationProgress): void {
+      self.gearOptimizationStatus = { status: 'running', progress };
+    },
+    setGearOptimizationResult(report: GearOptimizationReport): void {
+      self.gearOptimizationRunner = undefined;
+      self.gearOptimizationStatus = { status: 'done', report };
+    },
+    setGearOptimizationError(error: string): void {
+      self.gearOptimizationRunner = undefined;
+      self.gearOptimizationStatus = { status: 'error', error };
+    },
+    applyGearOptimization(result: GearOptimizationResult): void {
+      for (const [ slot, gearId ] of result.selectedGears) {
+        if (self.equippedGears.get(slot.toString()) === undefined) {
+          const gear = self.gears.get(gearId.toString());
+          if (gear !== undefined) {
+            self.equippedGears.set(slot.toString(), gear);
+          }
+        }
+      }
+      if (self.equippedGears.get('-1') === undefined && result.foodId !== undefined) {
+        const food = self.gears.get(result.foodId.toString());
+        if (food !== undefined) {
+          self.equippedGears.set('-1', food);
+        }
+      }
+      for (const [ gearId, assignments ] of result.materiaAssignments) {
+        const gear = self.gears.get(gearId.toString()) as IGear | undefined;
+        if (gear === undefined) continue;
+        for (const assignment of assignments) {
+          const materia = gear.materias[assignment.index];
+          if (materia !== undefined && materia.stat === undefined) {
+            materia.meld(assignment.stat, assignment.grade);
+          }
+        }
+      }
+    },
     startEditing(): void {
       self.mode = 'edit';
       let minLevel = Infinity;
@@ -813,3 +857,88 @@ export const Store = mst.types
   }));
 
 export interface IStore extends mst.Instance<typeof Store> {}
+
+function buildGearOptimizationInput(store: IStore): GearOptimizationInput {
+  const candidateSlots = store.schema.slots
+    .filter(slot => slot.slot > 0 || slot.slot === -12)
+    .map(slot => {
+      const equipped = store.equippedGears.get(slot.slot.toString());
+      const gears = equipped !== undefined ? [equipped] : (store.groupedGears[slot.slot] ?? []);
+      return {
+        slot: slot.slot,
+        name: slot.name,
+        plans: gears
+          .filter((gear): gear is IGear => !gear.isFood)
+          .map(gear => buildOptimizerGearInput(store, gear, slot, equipped !== undefined)),
+      };
+    });
+  const equippedFood = store.equippedGears.get('-1');
+  const foodCandidates = equippedFood?.isFood
+    ? [buildOptimizerFoodInput(equippedFood, true)]
+    : Array.from(store.gears.values())
+      .filter((gear): gear is IFood => gear.isFood && gear.slot === -1 && 'best' in gear.data)
+      .map(food => buildOptimizerFoodInput(food, false));
+  return {
+    job: store.job!,
+    jobLevel: store.jobLevel,
+    baseStats: { ...store.baseStats },
+    candidateSlots,
+    foodCandidates,
+    hasEquippedFood: equippedFood?.isFood ?? false,
+  };
+}
+
+function buildOptimizerGearInput(store: IStore, gear: IGear, slot: G.SlotSchema, fixed: boolean): OptimizerGearInput {
+  const bareStats: G.Stats = {};
+  for (const [ stat, value ] of Object.entries(gear.bareStats) as G.StatPairs) {
+    bareStats[gear.concretizeStat(stat)] = value;
+  }
+  if (gear.customizable) {
+    Object.assign(bareStats, gear.customStats!.toJSON());
+  }
+  const syncedLevel = gear.syncedLevel;
+  const materiaStats = gear.materiaStats;
+  return {
+    id: gear.id,
+    name: gear.name,
+    level: gear.level,
+    slot: slot.slot,
+    slotName: slot.name,
+    slotWeight: slot.levelWeight ?? 1,
+    fixed,
+    bareStats,
+    caps: { ...gear.caps },
+    syncedLevel,
+    syncedCaps: syncedLevel !== undefined ? G.getCaps(gear.data, syncedLevel) : undefined,
+    occultStats: gear.data.occultStats,
+    materiaSlot: gear.materiaSlot,
+    materias: gear.materias.map(materia => {
+      const optionGrade = materia.stat === undefined && syncedLevel === undefined
+        ? materia.meldableGrades[0]
+        : undefined;
+      const optionStats = optionGrade !== undefined
+        ? store.schema.stats.filter(stat => {
+          if (!(stat in G.materias)) return false;
+          const materiaValue = G.materias[stat]![optionGrade - 1];
+          return (materiaStats[stat] ?? 0) + materiaValue <= gear.totalMeldableStats[stat]!;
+        })
+        : [];
+      return {
+        index: materia.index,
+        fixedStat: materia.stat,
+        fixedGrade: materia.grade,
+        optionStats,
+        optionGrade,
+      };
+    }),
+  };
+}
+
+function buildOptimizerFoodInput(food: IFood, fixed: boolean): OptimizerFoodInput {
+  return {
+    id: food.id,
+    stats: { ...food.stats },
+    statRates: { ...food.statRates },
+    fixed,
+  };
+}
