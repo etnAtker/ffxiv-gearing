@@ -6,28 +6,84 @@ import { useStore } from './components/contexts';
 import type { DropdownPopperProps } from './components/Dropdown';
 import type { GearOptimizationConfig, GearOptimizationResult } from '../optimizer/GearOptimizerTypes';
 
-type GearOptimizationObjectiveType = 'damage' | 'tenMitigation' | 'mitigationEfficiency';
+type GearOptimizationObjectiveType = 'damage' | 'mitigationEfficiency';
+
+interface GearOptimizerPanelState {
+  minGcd?: string,
+  maxGcd?: string,
+  targetGcd?: string,
+  pruneRatio: string,
+  resultLimit: string,
+  objectiveType: GearOptimizationObjectiveType,
+  resultObjectiveType: GearOptimizationObjectiveType,
+  theoreticalMaxDamage?: string,
+  minTenMitigation: string,
+}
+
+const gearOptimizerPanelState: GearOptimizerPanelState = {
+  pruneRatio: '99.5',
+  resultLimit: '5',
+  objectiveType: 'damage',
+  resultObjectiveType: 'damage',
+  minTenMitigation: '',
+};
 
 export const GearOptimizerPanel = mobxReact.observer<DropdownPopperProps>(({ toggle }) => {
   const store = useStore();
   const defaultGcd = store.equippedEffects?.gcd.toFixed(2) ?? '';
   const defaultDamage = store.equippedEffects?.damage.toFixed(5) ?? '';
-  const [ minGcd, setMinGcd ] = React.useState(defaultGcd);
-  const [ maxGcd, setMaxGcd ] = React.useState(defaultGcd);
-  const [ targetGcd, setTargetGcd ] = React.useState(defaultGcd);
-  const [ pruneRatio, setPruneRatio ] = React.useState('99.5');
-  const [ resultLimit, setResultLimit ] = React.useState('5');
-  const [ objectiveType, setObjectiveType ] = React.useState<GearOptimizationObjectiveType>('damage');
-  const [ resultObjectiveType, setResultObjectiveType ] = React.useState<GearOptimizationObjectiveType>('damage');
-  const [ theoreticalMaxDamage, setTheoreticalMaxDamage ] = React.useState(defaultDamage);
-  const [ minTenMitigation, setMinTenMitigation ] = React.useState('');
+  const [ minGcd, setMinGcdState ] = React.useState(gearOptimizerPanelState.minGcd ?? defaultGcd);
+  const [ maxGcd, setMaxGcdState ] = React.useState(gearOptimizerPanelState.maxGcd ?? defaultGcd);
+  const [ targetGcd, setTargetGcdState ] = React.useState(gearOptimizerPanelState.targetGcd ?? defaultGcd);
+  const [ pruneRatio, setPruneRatioState ] = React.useState(gearOptimizerPanelState.pruneRatio);
+  const [ resultLimit, setResultLimitState ] = React.useState(gearOptimizerPanelState.resultLimit);
+  const [ objectiveType, setObjectiveTypeState ] =
+    React.useState<GearOptimizationObjectiveType>(gearOptimizerPanelState.objectiveType);
+  const [ resultObjectiveType, setResultObjectiveTypeState ] =
+    React.useState<GearOptimizationObjectiveType>(gearOptimizerPanelState.resultObjectiveType);
+  const [ theoreticalMaxDamage, setTheoreticalMaxDamageState ] =
+    React.useState(gearOptimizerPanelState.theoreticalMaxDamage ?? defaultDamage);
+  const [ minTenMitigation, setMinTenMitigationState ] = React.useState(gearOptimizerPanelState.minTenMitigation);
   const optimizationStatus = store.gearOptimizationStatus;
   const report = optimizationStatus.status === 'done' ? optimizationStatus.report : undefined;
   const running = optimizationStatus.status === 'running';
   const unavailable = store.schema.mainStat === undefined || store.isViewing;
   const supportsTenacity = store.schema.stats.includes('TEN');
+  const setMinGcd = (value: string) => {
+    gearOptimizerPanelState.minGcd = value;
+    setMinGcdState(value);
+  };
+  const setMaxGcd = (value: string) => {
+    gearOptimizerPanelState.maxGcd = value;
+    setMaxGcdState(value);
+  };
+  const setTargetGcd = (value: string) => {
+    gearOptimizerPanelState.targetGcd = value;
+    setTargetGcdState(value);
+  };
+  const setPruneRatio = (value: string) => {
+    gearOptimizerPanelState.pruneRatio = value;
+    setPruneRatioState(value);
+  };
+  const setResultLimit = (value: string) => {
+    gearOptimizerPanelState.resultLimit = value;
+    setResultLimitState(value);
+  };
+  const setResultObjectiveType = (type: GearOptimizationObjectiveType) => {
+    gearOptimizerPanelState.resultObjectiveType = type;
+    setResultObjectiveTypeState(type);
+  };
+  const setTheoreticalMaxDamage = (value: string) => {
+    gearOptimizerPanelState.theoreticalMaxDamage = value;
+    setTheoreticalMaxDamageState(value);
+  };
+  const setMinTenMitigation = (value: string) => {
+    gearOptimizerPanelState.minTenMitigation = value;
+    setMinTenMitigationState(value);
+  };
   const setOptimizationObjectiveType = (type: GearOptimizationObjectiveType) => {
-    setObjectiveType(type);
+    gearOptimizerPanelState.objectiveType = type;
+    setObjectiveTypeState(type);
     if (type === 'mitigationEfficiency') {
       setPruneRatio('30');
     } else {
@@ -127,7 +183,6 @@ export const GearOptimizerPanel = mobxReact.observer<DropdownPopperProps>(({ tog
                     }}
                   >
                     <option value="damage">最高伤害期望</option>
-                    <option value="tenMitigation">最高减伤率</option>
                     <option value="mitigationEfficiency">目标减伤率</option>
                   </select>
                 </label>
@@ -254,8 +309,6 @@ function buildObjectiveConfig(
   minTenMitigation: string,
 ): GearOptimizationConfig['objective'] {
   switch (type) {
-    case 'tenMitigation':
-      return { type: 'tenMitigation' };
     case 'mitigationEfficiency':
       return {
         type: 'mitigationEfficiency',
@@ -275,8 +328,6 @@ function parseOptionalPercent(value: string): number | undefined {
 
 function getObjectiveSubtitle(type: GearOptimizationObjectiveType): string {
   switch (type) {
-    case 'tenMitigation':
-      return '减伤率最大';
     case 'mitigationEfficiency':
       return '减伤率不低于目标且伤害转换率最高';
     case 'damage':
@@ -290,7 +341,6 @@ function formatPercent(value: number): string {
 }
 
 function formatObjectiveScore(result: GearOptimizationResult, type: GearOptimizationObjectiveType): string {
-  if (type === 'tenMitigation') return formatPercent(result.objectiveScore);
   return result.objectiveScore.toFixed(6);
 }
 

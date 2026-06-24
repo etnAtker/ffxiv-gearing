@@ -12,7 +12,6 @@ export interface GearOptimizationConfig {
 
 export type GearOptimizationObjective =
   | { type: 'damage' }
-  | { type: 'tenMitigation' }
   | { type: 'mitigationEfficiency', theoreticalMaxDamage: number, minTenMitigation?: number };
 
 export interface MateriaAssignment {

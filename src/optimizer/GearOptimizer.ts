@@ -173,8 +173,6 @@ function getOptimizationObjective(
 
 function calculateObjectiveScore(effects: CombatEffects, objective: GearOptimizationObjective): number {
   switch (objective.type) {
-    case 'tenMitigation':
-      return effects.tenMitigation;
     case 'mitigationEfficiency': {
       const damageLoss = Math.max(objective.theoreticalMaxDamage - effects.damage, objectiveEpsilon);
       return effects.tenMitigation / damageLoss;
