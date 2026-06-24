@@ -1,8 +1,9 @@
 import * as G from '../game';
 import { calculateCombatEffects, calculateGcd } from '../stores/effects';
+import type { CombatEffects } from '../stores/effects';
 import type { GearOptimizationConfig, GearOptimizationInput, GearOptimizationProgress,
-  GearOptimizationReport, GearOptimizationResult, MateriaAssignment, OptimizerFoodInput,
-  OptimizerGearInput } from './GearOptimizerTypes';
+  GearOptimizationObjective, GearOptimizationReport, GearOptimizationResult, MateriaAssignment,
+  OptimizerFoodInput, OptimizerGearInput } from './GearOptimizerTypes';
 
 export type { GearOptimizationConfig, GearOptimizationInput, GearOptimizationProgress,
   GearOptimizationReport, GearOptimizationResult, MateriaAssignment } from './GearOptimizerTypes';
@@ -67,6 +68,7 @@ interface LocalMateriaState {
 type SparseFenwickNode = Map<number, number | SparseFenwickNode>;
 
 const smallBucketSkylineThreshold = 64;
+const objectiveEpsilon = 1e-9;
 
 const optimizerStats = (Object.keys(G.statNames) as G.Stat[])
   .filter(stat => stat !== 'main' && stat !== 'secondary');
@@ -80,6 +82,10 @@ export function optimizeGearset(
   const schema = G.jobSchemas[input.job];
   if (schema.mainStat === undefined) {
     return { results: [], error: '装备优化仅支持战斗职业。', candidateCount: 0, stateCount: 0 };
+  }
+  const objective = getOptimizationObjective(schema, config);
+  if (typeof objective === 'string') {
+    return { results: [], error: objective, candidateCount: 0, stateCount: 0 };
   }
   const speedStat = getSpeedStat(schema);
   const speedRange = getAllowedSpeedRange(input, schema, speedStat, config);
@@ -122,14 +128,14 @@ export function optimizeGearset(
         nextStates.push(nextIndex);
       }
     }
-    states = pruneStates(pool, nextStates, benefitStats, input, schema, config);
+    states = pruneStates(pool, nextStates, benefitStats, input, schema, config, objective);
     stateCount = Math.max(stateCount, states.length);
     onProgress({ phase: '搜索装备组合', current: i + 1, total: candidateSlots.length, states: states.length });
     if (states.length === 0) break;
   }
 
   onProgress({ phase: '枚举食品', current: 0, total: states.length, states: states.length });
-  const results = finalizeResults(input, schema, pool, states, localPlans, config, speedStat)
+  const results = finalizeResults(input, schema, pool, states, localPlans, config, speedStat, objective)
     .sort((a, b) => compareResults(a, b, config))
     .slice(0, config.resultLimit);
   onProgress({ phase: '完成', current: 1, total: 1, states: results.length });
@@ -143,6 +149,40 @@ export function optimizeGearset(
 
 function getSpeedStat(schema: G.JobSchema): 'SKS' | 'SPS' {
   return schema.stats.includes('SPS') ? 'SPS' : 'SKS';
+}
+
+function getOptimizationObjective(
+  schema: G.JobSchema,
+  config: GearOptimizationConfig,
+): GearOptimizationObjective | string {
+  const objective = config.objective ?? { type: 'damage' };
+  if (!schema.stats.includes('TEN')) return { type: 'damage' };
+  if (objective.type === 'mitigationEfficiency') {
+    if (!Number.isFinite(objective.theoreticalMaxDamage) || objective.theoreticalMaxDamage <= 0) {
+      return '理论最高伤害期望必须大于 0。';
+    }
+    if (objective.minTenMitigation !== undefined &&
+      (!Number.isFinite(objective.minTenMitigation) ||
+        objective.minTenMitigation < 0 ||
+        objective.minTenMitigation >= 1)) {
+      return '最低坚韧减伤率必须大于等于 0 且小于 100%。';
+    }
+  }
+  return objective;
+}
+
+function calculateObjectiveScore(effects: CombatEffects, objective: GearOptimizationObjective): number {
+  switch (objective.type) {
+    case 'tenMitigation':
+      return effects.tenMitigation;
+    case 'mitigationEfficiency': {
+      const damageLoss = Math.max(objective.theoreticalMaxDamage - effects.damage, objectiveEpsilon);
+      return effects.tenMitigation / damageLoss;
+    }
+    case 'damage':
+    default:
+      return effects.damage;
+  }
 }
 
 function getBenefitStats(schema: G.JobSchema, speedStat: G.Stat): G.Stat[] {
@@ -520,7 +560,11 @@ function hasUsedAnyItemId(pool: StatePool, localPlans: LocalPlan[], stateIndex: 
 function calculateRemainingMaxSpeeds(candidateSlots: CandidateSlotPlans[], localPlans: LocalPlan[]): number[] {
   const ret = new Array(candidateSlots.length + 1).fill(0);
   for (let i = candidateSlots.length - 1; i >= 0; i--) {
-    ret[i] = ret[i + 1] + Math.max(...candidateSlots[i].planIndexes.map(planIndex => localPlans[planIndex].speed), 0);
+    let maxSpeed = 0;
+    for (const planIndex of candidateSlots[i].planIndexes) {
+      maxSpeed = Math.max(maxSpeed, localPlans[planIndex].speed);
+    }
+    ret[i] = ret[i + 1] + maxSpeed;
   }
   return ret;
 }
@@ -532,6 +576,7 @@ function pruneStates(
   input: GearOptimizationInput,
   schema: G.JobSchema,
   config: GearOptimizationConfig,
+  objective: GearOptimizationObjective,
 ): number[] {
   const bySpeed = new Map<number, number[]>();
   for (const stateIndex of states) {
@@ -542,9 +587,11 @@ function pruneStates(
   }
   const ret: number[] = [];
   for (const bucket of bySpeed.values()) {
-    const scoredBucket = pruneByObjectiveRatio(pool, bucket, input, schema, config)
+    const scoredBucket = pruneByObjectiveRatio(pool, bucket, input, schema, config, objective)
       .sort((a, b) => b.score - a.score);
-    ret.push(...buildParetoFrontier(pool, scoredBucket, benefitStats));
+    for (const stateIndex of buildParetoFrontier(pool, scoredBucket, benefitStats)) {
+      ret.push(stateIndex);
+    }
   }
   return ret;
 }
@@ -555,9 +602,10 @@ function pruneByObjectiveRatio(
   input: GearOptimizationInput,
   schema: G.JobSchema,
   config: GearOptimizationConfig,
+  objective: GearOptimizationObjective,
 ): ScoredState[] {
   const scoredStates = states.map(stateIndex => {
-    const score = scoreState(pool, stateIndex, input, schema);
+    const score = scoreState(pool, stateIndex, input, schema, objective);
     return { stateIndex, score };
   });
   const ratio = config.pruneRatio;
@@ -627,7 +675,10 @@ function getEffectiveBenefitStats(pool: StatePool, states: number[], benefitStat
 }
 
 function buildOneDimensionalSkyline(points: SkylinePoint[]): number[] {
-  const best = Math.max(...points.map(point => point.values[0]));
+  let best = -Infinity;
+  for (const point of points) {
+    best = Math.max(best, point.values[0]);
+  }
   return points
     .filter(point => point.values[0] === best)
     .map(point => point.stateIndex);
@@ -734,15 +785,26 @@ function querySparseFenwickNode(node: SparseFenwickNode, indexes: number[], dim:
   return ret;
 }
 
-function scoreState(pool: StatePool, stateIndex: number, input: GearOptimizationInput, schema: G.JobSchema): number {
+function scoreState(
+  pool: StatePool,
+  stateIndex: number,
+  input: GearOptimizationInput,
+  schema: G.JobSchema,
+  objective: GearOptimizationObjective,
+): number {
   const cached = pool.score[stateIndex];
   if (!Number.isNaN(cached)) return cached;
-  const score = scoreStats(input, schema, arrayToStats(pool.statsWithoutFood[stateIndex]));
+  const score = scoreStats(input, schema, arrayToStats(pool.statsWithoutFood[stateIndex]), objective);
   pool.score[stateIndex] = score;
   return score;
 }
 
-function scoreStats(input: GearOptimizationInput, schema: G.JobSchema, stats: G.Stats): number {
+function scoreStats(
+  input: GearOptimizationInput,
+  schema: G.JobSchema,
+  stats: G.Stats,
+  objective: GearOptimizationObjective,
+): number {
   const effects = calculateCombatEffects({
     job: input.job,
     jobLevel: input.jobLevel,
@@ -750,7 +812,7 @@ function scoreStats(input: GearOptimizationInput, schema: G.JobSchema, stats: G.
     stats,
     baseStats: input.baseStats,
   });
-  return effects?.damage ?? 0;
+  return effects === undefined ? 0 : calculateObjectiveScore(effects, objective);
 }
 
 function dominates(a: G.Stats, b: G.Stats, stats: G.Stat[]): boolean {
@@ -786,6 +848,7 @@ function finalizeResults(
   localPlans: LocalPlan[],
   config: GearOptimizationConfig,
   speedStat: G.Stat,
+  objective: GearOptimizationObjective,
 ): GearOptimizationResult[] {
   const ret: GearOptimizationResult[] = [];
   for (const stateIndex of states) {
@@ -801,9 +864,13 @@ function finalizeResults(
       });
       if (effects === undefined) continue;
       if (!matchesGcd(effects.gcd, config)) continue;
+      if (!matchesObjectiveConstraints(effects, objective)) continue;
+      const objectiveScore = calculateObjectiveScore(effects, objective);
       const path = buildResultPath(pool, localPlans, stateIndex);
       ret.push({
+        objectiveScore,
         damage: effects.damage,
+        tenMitigation: effects.tenMitigation,
         gcd: effects.gcd,
         equippedLevel: floor(pool.equippedLevelTotal[stateIndex] / pool.equippedLevelWeight[stateIndex]),
         stats,
@@ -819,6 +886,15 @@ function finalizeResults(
   return dedupeResults(ret, speedStat);
 }
 
+function matchesObjectiveConstraints(effects: CombatEffects, objective: GearOptimizationObjective): boolean {
+  if (objective.type === 'mitigationEfficiency' &&
+    objective.minTenMitigation !== undefined &&
+    effects.tenMitigation < objective.minTenMitigation) {
+    return false;
+  }
+  return true;
+}
+
 function buildResultPath(pool: StatePool, localPlans: LocalPlan[], stateIndex: number): {
   selectedGears: [number, G.GearId][],
   materiaAssignments: [G.GearId, MateriaAssignment[]][],
@@ -832,8 +908,12 @@ function buildResultPath(pool: StatePool, localPlans: LocalPlan[], stateIndex: n
   }
   for (let i = planIndexes.length - 1; i >= 0; i--) {
     const plan = localPlans[planIndexes[i]];
-    selectedGears.push(...plan.selectedGears);
-    materiaAssignments.push(...plan.materiaAssignmentsByGear);
+    for (const selectedGear of plan.selectedGears) {
+      selectedGears.push(selectedGear);
+    }
+    for (const materiaAssignment of plan.materiaAssignmentsByGear) {
+      materiaAssignments.push(materiaAssignment);
+    }
   }
   return { selectedGears, materiaAssignments };
 }
@@ -859,8 +939,12 @@ function matchesGcd(gcd: number, config: GearOptimizationConfig): boolean {
 }
 
 function compareResults(a: GearOptimizationResult, b: GearOptimizationResult, config: GearOptimizationConfig): number {
+  const scoreDiff = b.objectiveScore - a.objectiveScore;
+  if (Math.abs(scoreDiff) > objectiveEpsilon) return scoreDiff;
   const damageDiff = b.damage - a.damage;
-  if (Math.abs(damageDiff) > 1e-9) return damageDiff;
+  if (Math.abs(damageDiff) > objectiveEpsilon) return damageDiff;
+  const tenMitigationDiff = b.tenMitigation - a.tenMitigation;
+  if (Math.abs(tenMitigationDiff) > objectiveEpsilon) return tenMitigationDiff;
   if (config.targetGcd !== undefined) {
     const gcdDiff = Math.abs(a.gcd - config.targetGcd) - Math.abs(b.gcd - config.targetGcd);
     if (gcdDiff !== 0) return gcdDiff;
@@ -876,6 +960,7 @@ function dedupeResults(results: GearOptimizationResult[], speedStat: G.Stat): Ge
   for (const result of results) {
     const key = [
       result.damage.toFixed(9),
+      result.tenMitigation.toFixed(9),
       result.gcd.toFixed(2),
       result.stats[speedStat],
       result.selectedGears.map(([slot, id]) => `${slot}:${id}`).join(','),

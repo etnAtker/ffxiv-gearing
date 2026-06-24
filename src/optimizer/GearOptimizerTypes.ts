@@ -7,7 +7,13 @@ export interface GearOptimizationConfig {
   targetGcd?: number,
   pruneRatio?: number,
   resultLimit: number,
+  objective?: GearOptimizationObjective,
 }
+
+export type GearOptimizationObjective =
+  | { type: 'damage' }
+  | { type: 'tenMitigation' }
+  | { type: 'mitigationEfficiency', theoreticalMaxDamage: number, minTenMitigation?: number };
 
 export interface MateriaAssignment {
   index: number,
@@ -16,7 +22,9 @@ export interface MateriaAssignment {
 }
 
 export interface GearOptimizationResult {
+  objectiveScore: number,
   damage: number,
+  tenMitigation: number,
   gcd: number,
   equippedLevel: number,
   stats: G.Stats,
