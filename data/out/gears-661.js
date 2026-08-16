@@ -13552,6 +13552,23 @@ export default [
     source: '宇宙探索',
   },
   {
+    id: 52439,
+    name: '哈罗妮耳坠',
+    level: 690,
+    rarity: 1,
+    slot: 9,
+    role: 0,
+    jobCategory: 34,
+    equipLevel: 1,
+    materiaSlot: 0,
+    stats: {
+      VIT: 214,
+      DET: 162,
+      main: 212,
+      secondary: 162,
+    },
+  },
+  {
     id: 42696,
     name: '新生王国曲刃刀',
     level: 700,

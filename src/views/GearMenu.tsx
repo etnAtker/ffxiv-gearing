@@ -26,6 +26,17 @@ export const GearMenu = mobxReact.observer<{
           )}
         </div>
       </RippleLazy>
+      <RippleLazy>
+        <div
+          className="gear-menu_item"
+          onClick={() => {
+            toggle();
+            store.removeGearFromCurrentList(gear.id);
+          }}
+        >
+          删除此道具
+        </div>
+      </RippleLazy>
       <div className="gear-menu_divider" />
       {!gear.isFood && gear.source && store.setting.gearDisplayName === 'name' && (
         <div className="gear-menu_item">获取途径：{gear.source}</div>

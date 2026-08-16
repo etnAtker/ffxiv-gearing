@@ -3,12 +3,16 @@ import * as mst from 'mobx-state-tree';
 import * as G from '../game';
 import * as share from '../share';
 import { runGearOptimizationInWorker, type GearOptimizationRunner } from '../optimizer/GearOptimizerRunner';
-import type { GearOptimizationConfig, GearOptimizationInput, GearOptimizationProgress,
+import type {
+  GearOptimizationConfig, GearOptimizationInput, GearOptimizationProgress,
   GearOptimizationReport, GearOptimizationResult, GearOptimizationStatus, OptimizerFoodInput,
-  OptimizerGearInput } from '../optimizer/GearOptimizerTypes';
+  OptimizerGearInput
+} from '../optimizer/GearOptimizerTypes';
 import { calculateCombatEffects } from './effects';
-import { floor, ceil, Setting, Promotion, GearUnion, GearUnionReference,
-  gearDataOrdered, gearDataLoading, loadGearDataOfGearId, loadGearDataOfLevelRange } from '.';
+import {
+  floor, ceil, Setting, Promotion, GearUnion, GearUnionReference,
+  gearDataOrdered, gearDataLoading, loadGearDataOfGearId, loadGearDataOfLevelRange
+} from '.';
 import type { IGear, IFood, IGearUnion, IMateria } from '.';
 
 const clanStorageKey = 'ffxiv-gearing.dt.clan';
@@ -23,10 +27,7 @@ export const Store = mst.types
     mode: mst.types.optional(mst.types.string as mst.ISimpleType<Mode>, 'edit'),
     job: mst.types.maybe(mst.types.string as mst.ISimpleType<G.Job>),
     jobLevel: mst.types.optional(mst.types.number as mst.ISimpleType<G.JobLevel>, 100),
-    minLevel: mst.types.optional(mst.types.number, 0),
-    maxLevel: mst.types.optional(mst.types.number, 0),
-    minLevelIncoming: mst.types.maybe(mst.types.number),
-    maxLevelIncoming: mst.types.maybe(mst.types.number),
+    levelRangeText: mst.types.optional(mst.types.string, ''),
     syncLevel: mst.types.maybe(mst.types.number),
     filterFocus: mst.types.optional(mst.types.string as mst.ISimpleType<FilterFocus>, 'no'),
     showAllMaterias: mst.types.optional(mst.types.boolean, false),
@@ -43,6 +44,8 @@ export const Store = mst.types
     tiersShown: localStorage.getItem(tiersShownStorageKey) === 'true',
     materiaOverallActiveTab: 0,
     autoSelectScheduled: false,
+    pendingLevelRangeText: undefined as string | undefined,
+    excludedGearIds: mobx.observable.set<G.GearId>(),
     gearOptimizationStatus: { status: 'idle' } as GearOptimizationStatus,
     gearOptimizationRunner: undefined as GearOptimizationRunner | undefined,
   }))
@@ -51,18 +54,28 @@ export const Store = mst.types
       console.debug('filteredIds');
       if (self.job === undefined) return [];
       if (self.mode === 'view') {
-        return Array.from(self.gears.keys(), id => Number(id) as G.GearId);
+        return Array.from(self.gears.keys(), id => Number(id) as G.GearId)
+          .filter(id => !self.excludedGearIds.has(Math.abs(id) as G.GearId));
       }
+
+      const levelRanges = parseLevelRanges(self.levelRangeText);
       const unobservableEquippedGears = mobx.untracked(() => self.equippedGears.toJSON());
       const ret: G.GearId[] = [];
+
       for (const gear of gearDataOrdered.get()) {
-        const { job, minLevel, maxLevel } = self;
+        if (self.excludedGearIds.has(gear.id)) continue;
+
+        const { job } = self;
+
+        const levelMatched = levelRanges !== undefined &&
+          levelRanges.some(([min, max]) => gear.level >= min && gear.level <= max);
+
         if (
           G.jobCategories[gear.jobCategory][job!] &&
           (gear.slot === -1 ? (self.showAllFoods || 'best' in gear) :  // Foods
             gear.slot === -2 ? (self.showAllPotions || 'best' in gear) :  // Potions
               gear.slot === 17 || (gear.slot === 2 && job === 'FSH') ||  // Soul crystal and spearfishing gig
-              (gear.level >= minLevel && gear.level <= maxLevel &&
+              (levelMatched &&
                 !(gear.obsolete && this.setting.hideObsoleteGears))
           )
         ) {
@@ -85,8 +98,8 @@ export const Store = mst.types
   .views(self => ({
     get loadingStatus() {
       return gearDataLoading.get()
-        ? self.minLevelIncoming !== undefined || self.maxLevelIncoming !== undefined
-          ? 'appending'  // keep rendered when loading
+        ? self.pendingLevelRangeText !== undefined
+          ? 'appending'
           : 'loading'
         : 'ready';
     },
@@ -181,7 +194,7 @@ export const Store = mst.types
     },
     get materiaConsumption() {
       const consumption: { [index in G.Stat]?: { [index in G.MateriaGrade]?:
-          { safe: number, expectation: number, confidence90: number, confidence99: number, rates: number[] } } } = {};
+        { safe: number, expectation: number, confidence90: number, confidence99: number, rates: number[] } } } = {};
       for (const gear of self.equippedGears.values()) {
         if (gear === undefined || gear.isFood) continue;
         const duplicates = self.duplicateToolMateria &&
@@ -221,8 +234,8 @@ export const Store = mst.types
             consumptionItem!.confidence90 = consumptionItem!.confidence99 = consumptionItem!.safe;
             continue;
           }
-          const pp: number[][] = p.map(pi => [1, 1 - pi]);  // pp[i][j] = (1 - p[i]) ** j, for caching
-          const ps: Float64Array[] = [];  // ps[n][i]: success rate of using n materias to meld slots p[i..]
+          const pp: number[][] = p.map(pi => [1, 1 - pi]);
+          const ps: Float64Array[] = [];
           let n = 1;
           let n90 = 0;
           while (true) {
@@ -244,13 +257,19 @@ export const Store = mst.types
           }
           consumptionItem!.confidence90 = consumptionItem!.safe + n90 - 1;
           consumptionItem!.confidence99 = consumptionItem!.safe + n - 1;
-          thresholds90.push({ pBelow: ps[n90 - 1][0], pAbove: ps[n90][0],
-            increase: () => consumptionItem!.confidence90++ });
-          thresholds99.push({ pBelow: ps[n - 1][0], pAbove: ps[n][0],
-            increase: () => consumptionItem!.confidence99++ });
+          thresholds90.push({
+            pBelow: ps[n90 - 1][0],
+            pAbove: ps[n90][0],
+            increase: () => consumptionItem!.confidence90++,
+          });
+          thresholds99.push({
+            pBelow: ps[n - 1][0],
+            pAbove: ps[n][0],
+            increase: () => consumptionItem!.confidence99++,
+          });
         }
       }
-      for (const [ threshold, pTarget ] of [[thresholds90, .90], [thresholds99, .99]] as const) {
+      for (const [threshold, pTarget] of [[thresholds90, .90], [thresholds99, .99]] as const) {
         threshold.sort((a, b) => a.pBelow - b.pBelow);
         let pOverall = 1;
         for (const entry of threshold) {
@@ -332,13 +351,13 @@ export const Store = mst.types
     },
     get materiaDetDhtOptimized() {
       console.debug('materiaDetDhtOptimized');
-      type Pair = number;  // a packed DET,DHT pair
-      type Meld = [number, number];  // a meld assignment, [DET major materia amount, DET minor materia amount]
-      type OriginalMelds = { DET: Meld, DHT: Meld, all: Meld };  // eslint-disable-line
-      type Route = Pair[];  // a selection from possible pairs of every gear
+      type Pair = number;
+      type Meld = [number, number];
+      type OriginalMelds = { DET: Meld, DHT: Meld, all: Meld };
+      type Route = Pair[];
 
       const pack = (stats: G.Stats): Pair => ((stats.DET ?? 0) << 16) | (stats.DHT ?? 0);
-      const unpack = (pair: Pair) => ([ pair >> 16, pair & ~(-1 << 16) ]);
+      const unpack = (pair: Pair) => ([pair >> 16, pair & ~(-1 << 16)]);
       const mapPush = <TKey, TItem>(map: Map<TKey, TItem[]>, key: TKey, item: TItem) => {
         const items = map.get(key) ?? [];
         items.push(item);
@@ -354,7 +373,8 @@ export const Store = mst.types
       const freePossiblePairMelds = new Map<Pair, Meld[]>();
       const crucialGears: IGear[] = [];
       const crucialGearPossiblePairMelds: Map<Pair, Meld[]>[] = [];
-      mobx.runInAction(() => {  // this action only modifies the replica
+
+      mobx.runInAction(() => {
         const replica = Store.create(mst.getSnapshot(self));
         replica.unprotect();
 
@@ -382,42 +402,44 @@ export const Store = mst.types
           for (const materia of slots) materia.stat = 'DHT';
           const pairAllDht = pack(gear.stats);
           const overcapAllDht = gear.currentMeldableStats.DHT! < 0;
+
           if (pairAllDet === pairAllDht) {
-            // this gear is unaffected by DET/DHT materias, preserve stat value only
             fixedPair += pairAllDet;
           } else if (!overcapAllDet && !overcapAllDht && (freeGears.length === 0 ||
-              gear.materias[0].meldableGrades[0] === freeGears[0].materias[0].meldableGrades[0])) {
-            // this gear is free to meld from over cap, treat all these gears as one joint gear for better performance
+            gear.materias[0].meldableGrades[0] === freeGears[0].materias[0].meldableGrades[0])) {
             freeGears.push(gear);
             for (const materia of slots) {
               (materia.canRestricted ? freeMajorSlots : freeMinorSlots).push(materia);
             }
           } else {
-            // this gear might over cap, need to enumerate respectively
             crucialGears.push(gear);
             const majorSlots = slots.filter(m => m.canRestricted);
             const minorSlots = slots.filter(m => !m.canRestricted);
             const pairMelds = new Map<Pair, Meld[]>();
+
             for (let majorDetAmount = 0; majorDetAmount <= majorSlots.length; majorDetAmount++) {
               if (majorDetAmount > 0) majorSlots[majorDetAmount - 1].stat = 'DET';
               for (const minorSlot of minorSlots) minorSlot.stat = 'DHT';
+
               for (let minorDetAmount = 0; minorDetAmount <= minorSlots.length; minorDetAmount++) {
                 if (minorDetAmount > 0) minorSlots[minorDetAmount - 1].stat = 'DET';
                 const pair = pack(gear.stats);
                 mapPush(pairMelds, pair, [majorDetAmount, minorDetAmount]);
               }
             }
-            for (const pair of pairMelds.keys()) {  // prune completely inferior pairs
-              const [ DET, DHT ] = unpack(pair);
+
+            for (const pair of pairMelds.keys()) {
+              const [DET, DHT] = unpack(pair);
               for (const pair2 of pairMelds.keys()) {
                 if (pair === pair2) continue;
-                const [ DET2, DHT2 ] = unpack(pair2);
+                const [DET2, DHT2] = unpack(pair2);
                 if (DET <= DET2 && DHT <= DHT2) {
                   pairMelds.delete(pair);
                   break;
                 }
               }
             }
+
             crucialGearPossiblePairMelds.push(pairMelds);
           }
         }
@@ -425,6 +447,7 @@ export const Store = mst.types
         for (let majorDetAmount = 0; majorDetAmount <= freeMajorSlots.length; majorDetAmount++) {
           if (majorDetAmount > 0) freeMajorSlots[majorDetAmount - 1].stat = 'DET';
           for (const minorSlot of freeMinorSlots) minorSlot.stat = 'DHT';
+
           for (let minorDetAmount = 0; minorDetAmount <= freeMinorSlots.length; minorDetAmount++) {
             if (minorDetAmount > 0) freeMinorSlots[minorDetAmount - 1].stat = 'DET';
             const pair = freeGears.reduce((sc, gear) => sc + pack(gear.stats), 0);
@@ -446,6 +469,7 @@ export const Store = mst.types
       const totalPairPossibleRoutes = new Map<Pair, Route[]>();
       const combinedPossiblePairMelds = [freePossiblePairMelds].concat(crucialGearPossiblePairMelds);
       const route: Route = [];
+
       const search = (currentPair: Pair, gearIndex: number) => {
         if (gearIndex < combinedPossiblePairMelds.length) {
           for (const pair of combinedPossiblePairMelds[gearIndex].keys()) {
@@ -453,17 +477,19 @@ export const Store = mst.types
             search(currentPair + pair, gearIndex + 1);
           }
         } else {
-          let [ DET, DHT ] = unpack(currentPair);
+          let [DET, DHT] = unpack(currentPair);
           DET += Math.min(foodDet, floor(DET * foodDetRate / 100));
           DHT += Math.min(foodDht, floor(DHT * foodDhtRate / 100));
 
           const detDamage = floor((140 * (DET - main) / det + 1000) / detTrunc) * detTrunc / 1000;
           const dhtChance = floor(550 * (DHT - sub) / div + bluAetherialMimicry) / 1000;
           const damage = detDamage * (0.25 * dhtChance + 1);
+
           if (damage > maxDamage) {
             maxDamage = damage;
             acceptableDamage = damage * 0.9997;
           }
+
           if (damage > acceptableDamage) {
             const totalPair = pack({ DET, DHT });
             mapPush(damagePossibleTotalPairs, damage, totalPair);
@@ -471,31 +497,34 @@ export const Store = mst.types
           }
         }
       };
+
       search(fixedPair, 0);
+
       for (const damage of damagePossibleTotalPairs.keys()) {
         if (damage <= acceptableDamage) {
           damagePossibleTotalPairs.delete(damage);
         }
       }
+
       const damages = new Float64Array(damagePossibleTotalPairs.keys()).sort().reverse();
       const goodTotalPairs: Pair[] = [];
+
       for (const damage of damages) {
         goodTotalPairs.push(...new Set(damagePossibleTotalPairs.get(damage)!).values());
       }
 
-      // ↑ determine good DET/DHT distribution
-      // ↓ determine corresponding materia assignment
-
       const freeOriginalMelds: OriginalMelds = { DET: [0, 0], DHT: [0, 0], all: [0, 0] };
       const freeOriginalMaterias: IMateria[] = [];
       const freeGearMateriaPositions: Map<G.GearId, number[]> = new Map();
+
       for (const gear of freeGears) {
-        for (const [ stat, meld ] of Object.entries(freeOriginalMelds)) {
+        for (const [stat, meld] of Object.entries(freeOriginalMelds)) {
           meld[0] += gearOriginalMelds.get(gear.id)![stat as keyof OriginalMelds][0];
           meld[1] += gearOriginalMelds.get(gear.id)![stat as keyof OriginalMelds][1];
         }
         freeGearMateriaPositions.set(gear.id, []);
       }
+
       for (let materiaIndex = 0; materiaIndex < 5; materiaIndex++) {
         for (const gear of freeGears) {
           const originalGead = self.gears.get(gear.id) as IGear;
@@ -510,44 +539,61 @@ export const Store = mst.types
         Array.from({ length: combinedPossiblePairMelds.length }, () => new Map());
       const combinedPossiblePairMateriaStats: Map<Pair, G.Stat[]>[] =
         Array.from({ length: combinedPossiblePairMelds.length }, () => new Map());
+
       const solutions = goodTotalPairs.map(totalPair => {
         const routes = totalPairPossibleRoutes.get(totalPair)!;
         let bestDistance = Infinity;
         let bestRoute: Route | undefined;
+
         for (const route of routes) {
           let routeDistance = 0;
+
           for (let gearIndex = 0; gearIndex < route.length; gearIndex++) {
             const pair = route[gearIndex];
             let distance = combinedPossiblePairDistance[gearIndex].get(pair);
+
             if (distance === undefined) {
               distance = Infinity;
               let bestMateriaStats: G.Stat[] = [];
               const melds = combinedPossiblePairMelds[gearIndex].get(pair)!;
+
               for (const meld of melds) {
                 let currentDistance = 0;
-                const originalMaterias = gearIndex === 0 ? freeOriginalMaterias :
-                  (self.gears.get(crucialGears[gearIndex - 1].id) as IGear).materias;
-                const originalMelds = gearIndex === 0 ? freeOriginalMelds :
-                  gearOriginalMelds.get(crucialGears[gearIndex - 1].id)!;
+                const originalMaterias = gearIndex === 0
+                  ? freeOriginalMaterias
+                  : (self.gears.get(crucialGears[gearIndex - 1].id) as IGear).materias;
+                const originalMelds = gearIndex === 0
+                  ? freeOriginalMelds
+                  : gearOriginalMelds.get(crucialGears[gearIndex - 1].id)!;
                 const materiaStats = originalMaterias.map(m => m.stat);
+
                 for (const meldType of [0, 1]) {
-                  const statMeld = { DET: meld[meldType], DHT: originalMelds['all'][meldType] - meld[meldType] };
+                  const statMeld = {
+                    DET: meld[meldType],
+                    DHT: originalMelds['all'][meldType] - meld[meldType],
+                  };
+
                   for (const stat of ['DET', 'DHT'] as const) {
                     let retrieveAmount = originalMelds[stat][meldType] - statMeld[stat];
                     let materiaIndex = originalMaterias.length - 1;
+
                     while (retrieveAmount > 0) {
                       const materia = originalMaterias[materiaIndex];
+
                       if (materia.stat === stat && (materia.canRestricted === (meldType === 0))) {
                         currentDistance += 1000 + materia.gear.materias.length - materia.index;
                         materiaStats[materiaIndex] = undefined;
                         retrieveAmount--;
                       }
+
                       materiaIndex--;
                     }
                   }
+
                   for (const stat of ['DET', 'DHT'] as const) {
                     let meldAmount = statMeld[stat] - originalMelds[stat][meldType];
                     let materiaIndex = 0;
+
                     while (meldAmount > 0) {
                       if (materiaStats[materiaIndex] === undefined) {
                         materiaStats[materiaIndex] = stat;
@@ -557,51 +603,64 @@ export const Store = mst.types
                     }
                   }
                 }
+
                 if (currentDistance < distance) {
                   distance = currentDistance;
                   bestMateriaStats = materiaStats.slice() as G.Stat[];
                 }
               }
+
               combinedPossiblePairDistance[gearIndex].set(pair, distance);
               combinedPossiblePairMateriaStats[gearIndex].set(pair, bestMateriaStats);
             }
+
             routeDistance += distance;
           }
+
           if (routeDistance < bestDistance) {
             bestDistance = routeDistance;
             bestRoute = route;
           }
         }
+
         const gearMateriaStats: Map<G.GearId, G.Stat[]> = new Map();
+
         for (let gearIndex = 0; gearIndex < bestRoute!.length; gearIndex++) {
           const pair = bestRoute![gearIndex];
           const materiaStats = combinedPossiblePairMateriaStats[gearIndex].get(pair)!;
+
           if (gearIndex === 0) {
-            for (const [ gearId, positions ] of freeGearMateriaPositions.entries()) {
+            for (const [gearId, positions] of freeGearMateriaPositions.entries()) {
               gearMateriaStats.set(gearId, positions.map(p => materiaStats[p]));
             }
           } else {
             gearMateriaStats.set(crucialGears[gearIndex - 1].id, materiaStats);
           }
         }
-        const [ DET, DHT ] = unpack(totalPair);
+
+        const [DET, DHT] = unpack(totalPair);
         return { DET, DHT, gearMateriaStats };
       });
+
       return solutions;
     },
     get share(): string {
       if (self.job === undefined) return '';
       const gears: G.Gearset['gears'] = [];
+
       for (const slot of self.schema.slots) {
         const gear = self.equippedGears.get(slot.slot.toString());
         if (gear === undefined) continue;
+
         gears.push({
           id: gear.data.id,
-          materias: gear.isFood || gear.syncedLevel !== undefined ? [] :
-            gear.materias.map(m => m.stat !== undefined ? [m.stat, m.grade!] : null),
+          materias: gear.isFood || gear.syncedLevel !== undefined
+            ? []
+            : gear.materias.map(m => m.stat !== undefined ? [m.stat, m.grade!] : null),
           customStats: (gear as IGear).customStats?.toJSON(),
         });
       }
+
       return share.stringify({
         job: self.job,
         jobLevel: self.jobLevel,
@@ -614,12 +673,16 @@ export const Store = mst.types
     },
     get garlandGroup(): string {
       if (self.job === undefined) return '';
+
       const parts = [self.schema.name, self.equippedLevel, ' ', (new Date()).toLocaleString(), '{'];
+
       for (const slot of self.schema.slots) {
         if (slot.slot === 17 || (slot.slot === 2 && self.job === 'FSH')) continue;
+
         const gear = self.equippedGears.get(slot.slot.toString());
         if (gear === undefined) continue;
-        if (gear.data.id === parts.at(-2)) {  // same rings
+
+        if (gear.data.id === parts.at(-2)) {
           parts.splice(-1, 0, '+2');
         } else {
           parts.push('item/');
@@ -627,6 +690,7 @@ export const Store = mst.types
           parts.push('|');
         }
       }
+
       parts[parts.length - 1] = '}';
       return `#group/${encodeURI(parts.join(''))}`;
     },
@@ -634,9 +698,11 @@ export const Store = mst.types
       const suffix = '最终幻想14配装器';
       if (self.job === undefined) return suffix;
       if (self.loadingStatus !== 'ready') return undefined;
+
       const glance = self.schema.mainStat !== undefined
         ? `il${self.equippedLevel}/${this.equippedEffects.gcd.toFixed(2)}s`
         : self.schema.stats.map(s => self.equippedStats[s]).join('/');
+
       return `${self.schema.name}(${glance}) - ${suffix}`;
     },
   }))
@@ -653,58 +719,69 @@ export const Store = mst.types
       self.mode = mode;
     },
     setJob(job: G.Job): void {
+      self.pendingLevelRangeText = undefined;
+      self.excludedGearIds.clear();
+
       const oldSchema = self.job && G.jobSchemas[self.job];
       const newSchema = G.jobSchemas[job];
       self.job = job;
+
       if (newSchema.jobLevel !== oldSchema?.jobLevel || !newSchema.levelSyncable) {
         self.jobLevel = newSchema.jobLevel;
         self.syncLevel = undefined;
       }
+
       if (newSchema.defaultItemLevel !== oldSchema?.defaultItemLevel) {
-        self.minLevel = newSchema.defaultItemLevel[0];
-        self.maxLevel = newSchema.defaultItemLevel[1];
-        self.minLevelIncoming = undefined;
-        self.maxLevelIncoming = undefined;
+        self.levelRangeText = `${newSchema.defaultItemLevel[0]}-${newSchema.defaultItemLevel[1]}`;
       }
-      for (const [ key, gear ] of self.equippedGears.entries()) {
+
+      for (const [key, gear] of self.equippedGears.entries()) {
         if (gear !== undefined && !gear.jobs[job]) {
           self.equippedGears.delete(key);
         }
       }
+
       self.autoSelectScheduled = newSchema.skeletonGears ?? false;
     },
-    setMinLevel(level: number): void {
-      self.minLevelIncoming = level;
+    setLevelRangeText(value: string): boolean {
+      const ranges = parseLevelRanges(value);
+      if (ranges === undefined) return false;
+
+      if (value === self.pendingLevelRangeText) return true;
+      if (value === self.levelRangeText && self.pendingLevelRangeText === undefined) return true;
+
+      self.excludedGearIds.clear();
+      self.pendingLevelRangeText = value;
+
+      return true;
     },
-    setMaxLevel(level: number): void {
-      self.maxLevelIncoming = level;
-    },
-    submitIncomingLevels(): void {
-      if (self.minLevelIncoming !== undefined) {
-        self.minLevel = self.minLevelIncoming;
-        self.minLevelIncoming = undefined;
-      }
-      if (self.maxLevelIncoming !== undefined) {
-        self.maxLevel = self.maxLevelIncoming;
-        self.maxLevelIncoming = undefined;
-      }
+    submitPendingLevelRange(): void {
+      if (self.pendingLevelRangeText === undefined) return;
+
+      self.levelRangeText = self.pendingLevelRangeText;
+      self.pendingLevelRangeText = undefined;
     },
     setSyncLevel(level: number | undefined, jobLevel: G.JobLevel | undefined): void {
       self.syncLevel = level;
       self.jobLevel = jobLevel ?? self.schema.jobLevel;
     },
     setFilterFocus(filterFocus: FilterFocus) {
+      if (self.filterFocus === filterFocus) return;
+
+      self.excludedGearIds.clear();
       self.filterFocus = filterFocus;
     },
     setMateriaOverallActiveTab(activeTab: number) {
       self.materiaOverallActiveTab = activeTab;
     },
     setMateriaDetDhtOptimization(gearMateriaStats: Map<G.GearId, G.Stat[]>): void {
-      for (const [ gearId, materiaStats ] of gearMateriaStats.entries()) {
+      for (const [gearId, materiaStats] of gearMateriaStats.entries()) {
         const gear = self.gears.get(gearId as any) as IGear;
+
         for (let i = 0; i < gear.materias.length; i++) {
           const materia = gear.materias[i];
           materia.stat = materiaStats[i];
+
           if (materia.stat === 'DET' || materia.stat === 'DHT') {
             materia.grade = materia.meldableGrades[0];
           }
@@ -715,9 +792,11 @@ export const Store = mst.types
       self.showAllMaterias = !self.showAllMaterias;
     },
     toggleShowAllFoods(): void {
+      self.excludedGearIds.clear();
       self.showAllFoods = !self.showAllFoods;
     },
     toggleShowAllPotions(): void {
+      self.excludedGearIds.clear();
       self.showAllPotions = !self.showAllPotions;
     },
     toggleDuplicateToolMateria(): void {
@@ -729,7 +808,9 @@ export const Store = mst.types
         status: 'running',
         progress: { phase: '准备候选', current: 0, total: 1 },
       };
+
       const input = buildGearOptimizationInput(self as IStore);
+
       self.gearOptimizationRunner = runGearOptimizationInWorker({
         input,
         config,
@@ -755,25 +836,31 @@ export const Store = mst.types
       self.gearOptimizationStatus = { status: 'error', error };
     },
     applyGearOptimization(result: GearOptimizationResult): void {
-      for (const [ slot, gearId ] of result.selectedGears) {
+      for (const [slot, gearId] of result.selectedGears) {
         if (self.equippedGears.get(slot.toString()) === undefined) {
           const gear = self.gears.get(gearId.toString());
+
           if (gear !== undefined) {
             self.equippedGears.set(slot.toString(), gear);
           }
         }
       }
+
       if (self.equippedGears.get('-1') === undefined && result.foodId !== undefined) {
         const food = self.gears.get(result.foodId.toString());
+
         if (food !== undefined) {
           self.equippedGears.set('-1', food);
         }
       }
-      for (const [ gearId, assignments ] of result.materiaAssignments) {
+
+      for (const [gearId, assignments] of result.materiaAssignments) {
         const gear = self.gears.get(gearId.toString()) as IGear | undefined;
         if (gear === undefined) continue;
+
         for (const assignment of assignments) {
           const materia = gear.materias[assignment.index];
+
           if (materia !== undefined && materia.stat === undefined) {
             materia.meld(assignment.stat, assignment.grade);
           }
@@ -782,22 +869,53 @@ export const Store = mst.types
     },
     startEditing(): void {
       self.mode = 'edit';
+      self.pendingLevelRangeText = undefined;
+      self.excludedGearIds.clear();
+
       let minLevel = Infinity;
       let maxLevel = -Infinity;
+
       for (const slot of self.schema.slots) {
         const gear = self.equippedGears.get(slot.slot.toString());
-        if (gear !== undefined && slot.levelWeight !== 0 && gear.id !== 17726) {  // 17726: Spearfishing Gig
+
+        if (gear !== undefined && slot.levelWeight !== 0 && gear.id !== 17726) {
           if (gear.level < minLevel) minLevel = gear.level;
           if (gear.level > maxLevel) maxLevel = gear.level;
         }
       }
-      self.minLevel = minLevel;
-      self.maxLevel = maxLevel;
-      self.minLevelIncoming = undefined;
-      self.maxLevelIncoming = undefined;
+
+      self.levelRangeText = minLevel === maxLevel
+        ? minLevel.toString()
+        : `${minLevel}-${maxLevel}`;
+    },
+    removeGearFromCurrentList(gearId: G.GearId): void {
+      const id = Math.abs(gearId) as G.GearId;
+      self.excludedGearIds.add(id);
+
+      for (const [key, gear] of self.equippedGears.entries()) {
+        if (gear !== undefined && Math.abs(gear.id) === id) {
+          self.equippedGears.delete(key);
+        }
+      }
+    },
+    resetCurrentList(): void {
+      self.gearOptimizationRunner?.cancel();
+      self.gearOptimizationRunner = undefined;
+      self.gearOptimizationStatus = { status: 'idle' };
+
+      self.equippedGears.clear();
+
+      for (const gear of self.gears.values()) {
+        if (gear.isFood || self.excludedGearIds.has(Math.abs(gear.id) as G.GearId)) continue;
+
+        for (const materia of gear.materias) {
+          materia.meld(undefined);
+        }
+      }
     },
     equip(gear: IGearUnion): void {
       const key = gear.slot.toString();
+
       if (self.equippedGears.get(key) === gear) {
         self.equippedGears.delete(key);
       } else {
@@ -815,17 +933,23 @@ export const Store = mst.types
     autoSelect(): void {
       if (self.loadingStatus === 'loading') return;
       if (!self.autoSelectScheduled) return;
+
       self.autoSelectScheduled = false;
-      for (const [ slot, gears ] of Object.entries(self.groupedGears)) {
+
+      for (const [slot, gears] of Object.entries(self.groupedGears)) {
         if (self.equippedGears.get(slot) !== undefined) continue;
+
         let lastMeldable = gears[gears.length - 1];
+
         if (lastMeldable === undefined || lastMeldable.isFood || lastMeldable.slot === 17) continue;
+
         for (let i = gears.length - 1; i >= 0; i--) {
           if ((gears[i] as IGear).materiaAdvanced) {
             lastMeldable = gears[i];
             break;
           }
         }
+
         if (!lastMeldable.isEquipped) {
           this.equip(lastMeldable);
         }
@@ -837,33 +961,73 @@ export const Store = mst.types
   }))
   .actions(self => ({
     afterCreate(): void {
+      if (self.job !== undefined && parseLevelRanges(self.levelRangeText) === undefined) {
+        self.levelRangeText = `${self.schema.defaultItemLevel[0]}-${self.schema.defaultItemLevel[1]}`;
+      }
+
       for (const gearId of Object.values(self.equippedGears.toJSON())) {
         loadGearDataOfGearId(Math.abs(gearId as G.GearId));
       }
-      self.submitIncomingLevels();  // if user refreshs during appending, we should switch to hard loading
-      mobx.autorun(() => loadGearDataOfLevelRange(self.minLevel, self.maxLevel));
+
       mobx.autorun(() => {
-        if (self.minLevelIncoming !== undefined || self.maxLevelIncoming !== undefined) {
-          loadGearDataOfLevelRange(
-            self.minLevelIncoming ?? self.minLevel,
-            self.maxLevelIncoming ?? self.maxLevel,
-          );
-          mobx.when(() => !gearDataLoading.get(), self.submitIncomingLevels);
+        const ranges = parseLevelRanges(self.pendingLevelRangeText ?? self.levelRangeText);
+        if (ranges === undefined) return;
+
+        for (const [min, max] of ranges) {
+          loadGearDataOfLevelRange(min, max);
         }
       });
+
+      mobx.autorun(() => {
+        if (self.pendingLevelRangeText !== undefined && !gearDataLoading.get()) {
+          self.submitPendingLevelRange();
+        }
+      });
+
       mobx.reaction(() => self.filteredIds, self.createGears, { fireImmediately: true });
       mobx.reaction(() => self.autoSelectScheduled && self.groupedGears, self.autoSelect);
     },
   }));
 
-export interface IStore extends mst.Instance<typeof Store> {}
+export interface IStore extends mst.Instance<typeof Store> { }
+
+function parseLevelRanges(value: string): [number, number][] | undefined {
+  if (!value.trim()) return undefined;
+
+  const parts = value
+    .split(/[,，]/)
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  if (parts.length === 0) return undefined;
+
+  const ranges: [number, number][] = [];
+
+  for (const part of parts) {
+    const match = /^(\d+)(?:\s*[-–—~～]\s*(\d+))?$/.exec(part);
+    if (match === null) return undefined;
+
+    const a = parseInt(match[1], 10);
+    const b = match[2] === undefined ? a : parseInt(match[2], 10);
+
+    ranges.push([
+      Math.min(a, b),
+      Math.max(a, b),
+    ]);
+  }
+
+  return ranges;
+}
 
 function buildGearOptimizationInput(store: IStore): GearOptimizationInput {
   const candidateSlots = store.schema.slots
     .filter(slot => slot.slot > 0 || slot.slot === -12)
     .map(slot => {
       const equipped = store.equippedGears.get(slot.slot.toString());
-      const gears = equipped !== undefined ? [equipped] : (store.groupedGears[slot.slot] ?? []);
+      const gears = equipped !== undefined
+        ? [equipped]
+        : (store.groupedGears[slot.slot] ?? []);
+
       return {
         slot: slot.slot,
         name: slot.name,
@@ -872,12 +1036,19 @@ function buildGearOptimizationInput(store: IStore): GearOptimizationInput {
           .map(gear => buildOptimizerGearInput(store, gear, slot, equipped !== undefined)),
       };
     });
+
   const equippedFood = store.equippedGears.get('-1');
+
   const foodCandidates = equippedFood?.isFood
     ? [buildOptimizerFoodInput(equippedFood, true)]
     : Array.from(store.gears.values())
-      .filter((gear): gear is IFood => gear.isFood && gear.slot === -1 && 'best' in gear.data)
+      .filter((gear): gear is IFood =>
+        gear.isFood &&
+        gear.slot === -1 &&
+        'best' in gear.data &&
+        !store.excludedGearIds.has(Math.abs(gear.id) as G.GearId))
       .map(food => buildOptimizerFoodInput(food, false));
+
   return {
     job: store.job!,
     jobLevel: store.jobLevel,
@@ -888,16 +1059,25 @@ function buildGearOptimizationInput(store: IStore): GearOptimizationInput {
   };
 }
 
-function buildOptimizerGearInput(store: IStore, gear: IGear, slot: G.SlotSchema, fixed: boolean): OptimizerGearInput {
+function buildOptimizerGearInput(
+  store: IStore,
+  gear: IGear,
+  slot: G.SlotSchema,
+  fixed: boolean,
+): OptimizerGearInput {
   const bareStats: G.Stats = {};
-  for (const [ stat, value ] of Object.entries(gear.bareStats) as G.StatPairs) {
+
+  for (const [stat, value] of Object.entries(gear.bareStats) as G.StatPairs) {
     bareStats[gear.concretizeStat(stat)] = value;
   }
+
   if (gear.customizable) {
     Object.assign(bareStats, gear.customStats!.toJSON());
   }
+
   const syncedLevel = gear.syncedLevel;
   const materiaStats = gear.materiaStats;
+
   return {
     id: gear.id,
     name: gear.name,
@@ -909,20 +1089,26 @@ function buildOptimizerGearInput(store: IStore, gear: IGear, slot: G.SlotSchema,
     bareStats,
     caps: { ...gear.caps },
     syncedLevel,
-    syncedCaps: syncedLevel !== undefined ? G.getCaps(gear.data, syncedLevel) : undefined,
+    syncedCaps: syncedLevel !== undefined
+      ? G.getCaps(gear.data, syncedLevel)
+      : undefined,
     occultStats: gear.data.occultStats,
     materiaSlot: gear.materiaSlot,
     materias: gear.materias.map(materia => {
       const optionGrade = materia.stat === undefined && syncedLevel === undefined
         ? materia.meldableGrades[0]
         : undefined;
+
       const optionStats = optionGrade !== undefined
         ? store.schema.stats.filter(stat => {
           if (!(stat in G.materias)) return false;
+
           const materiaValue = G.materias[stat]![optionGrade - 1];
+
           return (materiaStats[stat] ?? 0) + materiaValue <= gear.totalMeldableStats[stat]!;
         })
         : [];
+
       return {
         index: materia.index,
         fixedStat: materia.stat,

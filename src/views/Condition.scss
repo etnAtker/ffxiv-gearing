@@ -5,6 +5,7 @@
   margin-top: 10px;
   overflow: visible;
 }
+
 .condition_divider {
   display: inline-block;
   margin: 9px 0;
@@ -13,9 +14,11 @@
   background-color: var(--color-divider);
   vertical-align: top;
 }
+
 .condition_right {
   float: right;
 }
+
 .condition_job {
   display: inline-block;
   padding: 0 12px;
@@ -24,11 +27,13 @@
   border-radius: 4px;
   vertical-align: top;
 }
+
 .condition_job-icon {
   width: 20px;
   padding-bottom: 2px;
   margin-left: -2px;
 }
+
 .condition_tip {
   display: inline-block;
   margin-top: 5px;
@@ -37,58 +42,64 @@
   color: rgb(var(--color-text-base), .60);
   text-decoration: none;
   vertical-align: top;
+
   &:hover {
     text-decoration: underline;
   }
+
   &.-highlight {
     font-weight: bold;
     color: var(--mdc-theme-error);
   }
 }
+
 .condition_level {
   display: inline-block;
   padding-left: 16px;
   line-height: 42px;
   vertical-align: top;
 }
+
 .condition_level-value {
   margin-right: 2px;
 }
-.condition_level-input {
-  width: 36px;
-  .mdc-text-field__input {
-    -moz-appearance: textfield;
-    &::-webkit-outer-spin-button,
-    &::-webkit-inner-spin-button {
-      -webkit-appearance: none;
-      margin: 0;
-    }
-  }
 
+.condition_level-input {
+  width: 180px;
 }
-.condition_level-separator {
-  margin: 0 4px;
+
+.condition_level-tip {
+  display: inline-block;
+  width: 16px;
+  margin: -1px 0 -1px 2px;
+  vertical-align: 1px;
+  color: rgb(var(--color-text-base), .55);
 }
+
 .condition_button {
   height: 34px;
   min-width: 48px;
   margin: 4px 8px;
   vertical-align: top;
+
   + .condition_button {
     margin-left: -4px;
   }
 }
+
 .condition_text {
   padding: 0 16px;
   line-height: 42px;
   vertical-align: top;
 }
+
 .condition_filter {
   margin-left: 6px;
-  margin-right: 6px;  // text to divider 16px
+  margin-right: 6px; // text to divider 16px
 }
+
 .condition_setting {
-  margin-right: 6px;  // text to divider 16px
+  margin-right: 6px; // text to divider 16px
 }
 
 .condition_level-sync-icon {
@@ -105,6 +116,7 @@
   transform-origin: right 38%;
   transition: box-shadow .1s ease-in-out;
   @include elevation(1);
+
   &:hover {
     @include elevation(2);
   }
